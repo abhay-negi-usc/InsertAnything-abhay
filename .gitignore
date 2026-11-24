@@ -53,3 +53,8 @@ _build
 **/*.pth
 **/*.pt
 **/*.ckpt
+.deps/
+
+# USB assets derived from McMaster-Carr CAD (theirs to distribute, not ours): rebuilt by
+# scripts/assets/extract_usb_prongs.py + build_usb_assets.py (docs/HANDOFF_usb_mating.md section 2).
+source/InsertAnything/InsertAnything/tasks/direct/insertanything/assets/usb/

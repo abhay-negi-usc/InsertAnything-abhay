@@ -1,0 +1,274 @@
+# USB-A mating on a KUKA iiwa 14 — plan
+
+Branch: `feature/usb-mating` · Drafted 2026-11-23
+
+Goal: insert a USB-A plug (McMaster 4974T135 cord) into a panel-mount USB-A receptacle (McMaster 4574N11)
+on the real iiwa 14 bench. The plug is held rigidly by a Robotiq 2F-85. The approach repeats the
+InsertAnything methodology: an Isaac Lab direct-RL environment with one fixed hole and one held peg,
+the decoupled gated reward, a tolerance ladder I→IV, an EMA-smoothed tared force observation, a
+fixed-σ LSTM PPO policy (RL-Games), and the deterministic closed-loop `sim2real/` runner on top of a
+Cartesian impedance controller.
+
+---
+
+## 0. What already exists (do not rebuild)
+
+| Need | Where it already lives | Status |
+| --- | --- | --- |
+| USB colliders (plug envelope 12.0×4.5 mm, pocket 12.50×5.12 mm, 0.5 mm flare, tongue relief) | `cable-assembly/sim/scripts/build_usb.py` → `sim/.../assets/data/usb/usb_{plug,socket}.usd` | Newton/SDF, authored in socket frame, plug *seated* |
+| iiwa 14 + 2F-85 articulation | `cable-assembly/sim/.../assets/data/iiwa14_2f85{,_bench}.usda`, `robotiq_2f85*/` | Isaac Sim 6.2 / Lab 3.0 authored |
+| iiwa control | `cable_assembly/robot/backends/iiwa_fri.py` (`IiwaFRIArm`), `fri_driver.py` (ruckig, 125 Hz stream) | Working |
+| Cartesian compliance | `robot/admittance.py`: `AdmittanceController` (software, on τ_ext) and `KukaImpedanceController` (KUKA CARTESIAN_IMPEDANCE, 3000 N/m / 50 Nm/rad) | Both exist; RL runner currently uses software admittance |
+| Force | `pinv(Jᵀ)·τ_ext`, 10 Hz LPF, software tare. **No wrist F/T.** Noise ≈1–2 N creeping, 2–5 N moving | Exists, noisy |
+| Socket pose | `perception/pose6d.py` (RAG-6DPose). One data point: 5.3/−9.5/0.6 mm off the taught mate | ~5–10 mm |
+| In-hand plug pose | `perception/in_hand_depth.py` (D435i depth). Tip std 0.3–1.1 mm; no roll; not yet run on the arm | Unvalidated |
+| Taught mate | `iiwa14_bench.frames.yaml` `targets.usb_connector` = [815.3, 226.3, 272.0] mm (uncommitted there) | Good to ~1 mm |
+| Parallel RL (Newton) | `newton_usb/` plug-held P1: 96.2% sim. `newton_usb_cable/` D2: 57%. Runner `skills/rl_usb_insertion.py` | One real-arm run (A4), which wrist-swung out of the box |
+
+**How this branch relates to the cable-assembly work:** this branch is a *second, independent policy
+stack*: PhysX + articulated arm + OSC, as in InsertAnything. It reuses that repo's CAD, cell
+calibration, perception and FRI driver. It does **not** reuse Newton's D6-spring hand model or its
+policies. Both stacks share the bench, so results from either compare directly on the R0–R4 test
+ladder in `cable-assembly/docs/RL_test_campaign.md`.
+
+**Scope:** the plug is rigidly held by the overmold, as in Newton variants P1/P2. Cable-held insertion
+is out of scope because InsertAnything assumes a rigid peg.
+
+---
+
+## 1. Gaps between InsertAnything and this task
+
+| # | InsertAnything assumes | USB on the iiwa bench | Consequence |
+| --- | --- | --- | --- |
+| G1 | Hole faces up; fingertip roll=π, pitch=0 are hard-clamped (`_apply_action`, `close_gripper_in_place`). Only yaw is free. | Receptacle is on the vertical pegboard, so the **insertion axis is horizontal (+x)** | Re-express the orientation clamp and all observations in the **hole frame** (§3.2) |
+| G2 | Franka + panda fingers; fingertip = midpoint of the panda fingers; OSC with gains DR 100–300 N/m | iiwa 14 + 2F-85; real arm under KUKA impedance (≈3000 N/m) or software admittance | New robot cfg; gain DR must bracket the *identified* real closed-loop stiffness (§3.1, §4.2) |
+| G3 | Force = gripper↔peg contact sensor, ±0.1 N obs noise; real = Franka `force_K_debug` | τ_ext-derived wrench, 1–5 N noise, motion-dependent bias | Train **pose-only first**. Force variant only with noise/bias/dropout matched to the measured M1 (§3.4) |
+| G4 | Single clearance per task, symmetric polygon pegs | Shell 0.25–0.31 mm/side, **tongue 0.04–0.07 mm**, 0.7 mm lead-in. Only 0° works (USB-A is not 180°-symmetric) | `symmetry_angles_deg: [0]`. The tolerance ladder becomes a USB clearance ladder (§2.2) |
+| G5 | No retention | Six detent springs; latch ~3–12 N (M4 unmeasured, guessed 8 N) | Axial detent force on the held asset, randomized (§2.3). Raise the force cap during the final stroke |
+| G6 | Peg pose in the fingers DR ±3 mm (x, z) | Hand-loaded plugs sit **16–29 mm / 6–14°** off nominal | A grasp fixture so loading repeats, plus a per-episode `T_AT` correction from `in_hand_depth` (§4.3) |
+| G7 | Target bias DR ~1 mm static | pose6d ≈5–10 mm; teach ≈1 mm | R1 uses the taught mate. Widen `fixed_asset_pos_static_error` to the M2 measurement for pose6d runs |
+| G8 | Isaac Sim 5.0 / Lab 2.2.1 / py3.11 | cable-assembly sim uses Isaac Sim 6.2 / Lab 3.0; robot env is py3.12 | Pick one Isaac version (§3.0). Keep the deployment runner Isaac-free |
+
+---
+
+## 2. Assets (week 1)
+
+### 2.1 Isaac/PhysX USB assets
+- Add `assets/usb/` to this repo with `usb_socket.usd` (fixed) and `usb_plug_{I..IV}.usd` (held).
+  They are generated by a script **ported from** `cable-assembly/sim/scripts/build_usb.py`, which
+  reuses its gmsh/trimesh solids. Do not hand-edit the Newton USDs.
+- Follow InsertAnything's asset conventions:
+  - socket origin at the hole mouth, +z out of the pocket;
+  - plug origin at the plug *base* (as used by `get_held_base_pose`), +z along the insertion axis;
+  - `FixedAssetCfg.diameter/height` = pocket width / depth;
+  - `HeldAssetCfg` mass ≈ plug + overmold + 50 mm stub (from the build script's densities).
+- Collision: use PhysX **SDF mesh collision** on both parts, as Factory does, with SDF resolution ≥ 256
+  over the 16 mm crop. Check `contact_offset` (0.5 mm in the current cfg). It is larger than the tongue
+  clearance, so drop it to ≤0.1 mm for the USB tasks and confirm that a seated plug does not jitter
+  or eject.
+- Sanity script: drop the plug in seated, then 0.5 mm off-axis. Log penetration and residual force.
+  Do this before any RL.
+
+### 2.2 USB tolerance ladder (the InsertAnything I→IV ladder, applied to USB)
+
+| Level | Shell gap / side | Tongue | Purpose |
+| --- | --- | --- | --- |
+| USB-I | 0.75 mm | removed | Pipeline bring-up, reward debugging |
+| USB-II | 0.50 mm | removed | |
+| USB-III | true 0.25–0.31 mm | relieved +0.15 mm/face (as Newton) | Main training target |
+| USB-IV | true | true CAD (0.04–0.07 mm) | Stretch target / evaluation only |
+
+Each level is one `@configclass` pair (`UsbSocket`, `UsbPeg_X`) plus one registered gym ID,
+`InsertAnything-UsbA-{I..IV}-Direct-v0`. This matches the existing `CircleHole_I` etc. pattern. Curriculum
+between levels is done by warm-starting from the previous checkpoint, as in the paper. No new
+curriculum code is needed.
+
+### 2.3 Detent
+PhysX has no axial frictionloss on a grasped body. Apply the detent as an
+external force on the held asset (`set_external_force_and_torque`). It acts against insertion when
+`z_disp ∈ [seat−3 mm, seat]`, with magnitude ~U(3, 12) N per episode and a velocity-sign Coulomb
+profile. Turn it on from USB-III up.
+
+---
+
+## 3. Simulation environment (weeks 1–3)
+
+### 3.0 Isaac version
+**Recommendation: stay on Isaac Sim 5.0 / Lab 2.2.1**, the version this repo was validated on, and
+bring the iiwa/2F-85 USDs over with flattening. Only touch the version if the `.usda` files depend on
+6.x-only schemas. The two sim stacks never share a process, so they do not need matching versions.
+
+### 3.1 Robot: iiwa 14 + 2F-85 in Isaac Lab
+- Move `RobotCfg` from `franka_mimic.usd` to `iiwa14_2f85.usda`. Add `fingertip_body` (the 2F-85 pad
+  midpoint; matches the cell's `fingertip_grasp` z = 182 mm) and `gripper_joint_names` (the 2F-85
+  `finger_joint` + mimic).
+- Generalize the env's hard-coded Franka assumptions behind the robot cfg:
+  - `panda_leftfinger/rightfinger` body indices and the contact-sensor filter paths
+    (`insertanything_env_cfg.py:115-116`);
+  - joint slices `7:9` for the gripper;
+  - `franka_fingerpad_length`;
+  - `reset_joints` / `default_dof_pos_tensor` (take from the cell's taught pre-insert pose, so the
+    null space matches the real elbow);
+  - `_set_franka_to_default_pose`.
+- Keep OSC (`insertanything_control.compute_dof_torque`) unchanged. It is arm-agnostic given J and M.
+- **Fast path, optional:** for a one-day smoke test of steps 2–3, run USB-I with the Franka still in place.
+  Swap to the iiwa before USB-III. Grasp geometry and the null-space posture matter at tight clearance.
+
+### 3.2 Hole-frame orientation (fixes G1)
+- Add `hole_axis_world` to the task, with the socket spawned on a vertical plate facing −x, as on the bench.
+- In `_apply_action` / `close_gripper_in_place`, replace the world-Euler clamp `roll=π, pitch=0` with
+  a clamp in the **hole frame**: the target tool-z stays anti-parallel to the hole +z, and the policy
+  controls only the twist about it (= yaw in the hole frame).
+- Observations `fingertip_pos_rel_fixed`, `fingertip_quat`, `ee_linvel/angvel` and contact force are
+  already relative or local. Express all of them in the hole frame, so the same policy serves a
+  wall-mounted or a table-mounted socket.
+- Keep a regression test: with the hole facing +z, the generalized code must give bit-identical actions
+  to the current code on the existing hexagon task.
+
+Alternative if G1 slips: put a temporary **up-facing** receptacle fixture on the table and run R1
+on it. That needs only §3.1 and is a pure replication. Then move to the pegboard.
+
+### 3.3 Task config (`InsertAnythingUsbA_III` as the reference)
+- `use_decoupled_reward=True`, `requires_orientation_logic=True`, `symmetry_angles_deg=[0.0]`.
+- Start the reward gates at the L-hole values, since L is also single-symmetry: `xy_dist_coef [50,2]`,
+  `z_dist_coef [50,1]`, `orientation_coef [50,2]`, `z_reward_gate_sharpness 100`. Then tighten.
+  - The gate is isotropic in xy, but the USB pocket is 2.4:1. Add an optional
+    per-axis gate `exp(-(k_w·e_w + k_h·e_h))` that is stricter along the 5.12 mm axis.
+- Success:
+  - `xy_dist < 0.0025` is too loose for a 0.3 mm gap. Use the per-axis error < gap, the
+    yaw error < 2°, and the seat depth within 0.5 mm (past the detent).
+  - `engage` = shell inside the mouth.
+- Randomization (initial):
+  - `hand_init_pos_range` [10, 10, 10] mm in the hole frame;
+  - twist ±10°;
+  - `fixed_asset_init_orn_range_deg` small (±5°): the panel is fixed, and pose error belongs in obs
+    noise;
+  - `held_asset_pos_range` ±2 mm / ±3°, widened later per M3;
+  - `dr_friction_range` 0.15–0.45 (Newton's measured-ish range);
+  - detent per §2.3.
+- `duration_s` 20.
+
+### 3.4 Force variant (`...-Force` gym IDs)
+- `force_source="gripper_peg"`, tared at t=0, `ema_alpha` 0.25, as in the paper.
+- DR to match the iiwa (all numbers to be replaced by the M1 measurement):
+  - white noise ~1 N;
+  - per-episode bias ±1.5 N;
+  - **motion-correlated bias** k·|v| up to ~3 N;
+  - `scale_range` [0.7, 1.3];
+  - `dropout_prob` 0.1.
+- Also feed the force reward penalty. Its scales must keep peak contact below the 2F-85 slip force,
+  12–32 N per the Newton report. Cap it at ~10 N except in the detent window.
+- **Gate:** deploy force policies only if the pose-only policy plateaus below 80% on the bench.
+
+### 3.5 Training and evaluation
+- RL-Games PPO from `rl_games_ppo_L_cfg.yaml` (LSTM 1024×2, MLP 512-128-64, fixed σ). 128–256 envs.
+- Each level is accepted on sim success ≥ 95% over 1000 episodes at the training randomization.
+- Sweep the observation bias with `--obs-hole-center-error-annulus` (0–5 mm) in sim. The
+  success-vs-bias curve says how good the target pose must be on the bench.
+- Add `usb` entries to the checkpoint README (obs dim, hash).
+
+---
+
+## 4. Real-robot deployment (weeks 3–5)
+
+### 4.1 Robot server shim, in cable-assembly
+Keep `sim2real/run_multi_episode_closed_loop.py` **unchanged**. Implement its HTTP contract (§2 of the
+sim2real README) as `cable_assembly/apps/insertanything_server.py`, on the cable-assembly
+`RL-hardware-testing` line:
+
+| Endpoint | Implementation |
+| --- | --- |
+| `POST /getstate` | `pose` = tool pose of API frame A in base (xyzw); `q, dq` from FRI; `vel` = filtered finite difference; `force_K_debug` = τ_ext wrench → force in the *plug* frame, tared at episode start (the sim sign convention is checked in §4.4) |
+| `POST /pose` | `[x,y,z,r,p,y]` → target for the chosen compliance controller (below) |
+| `POST /open_gripper` / `close_gripper` | Robotiq Modbus via the existing gripper module (`force_counts` per M5) |
+
+**Compliance under `/pose`: use `KukaImpedanceController` first, not the software admittance.**
+The A4 bench run showed that admittance on τ_ext noise swings the wrist (±5–9° on A5–A7). KUKA's
+impedance holds orientation in the controller's own loop, as Franka impedance does under SERL. Start at
+1500–3000 N/m and 100–200 Nm/rad rotational. Software admittance with rigid rotation stays as the fallback.
+
+Frames: the runner works in fingertip frame T; `T_AT` = tool0 → 2F-85 pad midpoint (cell
+`fingertip_grasp`) composed with the per-episode in-hand correction (§4.3). The YAML transforms
+`T_BH_final`/`T_BPRE_final` come from `targets.usb_connector` (teach). The pre-hover point backs off
+along the **hole axis (−x)**, not world z. This is a small change in the runner's `T_BPRE` derivation
+and the safety-box axes, and is the only runner change, needed because of G1.
+
+### 4.2 Controller system ID (before any policy)
+- Command 2 mm / 2° steps at 15 Hz through `/pose`, in free space and in contact with a flat plate.
+  Log `steps.jsonl`.
+- Fit the effective stiffness, damping and dead zone.
+- Then **set the sim gain DR (`dr_gains_trans/rot_range`, `dr_dead_zone_*`) to bracket the
+  fit**, and retrain or fine-tune. This is the single most important sim2real step. The released
+  Franka ranges (100–300 N/m) do not apply to the iiwa.
+
+### 4.3 Grasp repeatability (fixes G6)
+- A 3D-printed **plug cradle** at a taught load pose, so the 2F-85 closes on the overmold at a known
+  pose. Target: < 1 mm / 2° spread across 20 loads.
+- After the grasp, one `in_hand_depth` view refines the tip translation and axis, and the result goes
+  into `T_AT` for the episode. Refuse the episode if the correction is > 5 mm, reusing the hand-offset
+  gate idea.
+- Measure M3 against ground truth: touch the plug tip to a known corner, or use a fiducial. The
+  result sets `held_asset_pos_range` in sim.
+
+### 4.4 Parity checks (as in cable-assembly's `newton_usb_deploy_check`)
+1. Replay a logged sim episode's states through `observation_builder.py`. The obs must match the env
+   to 1e-5.
+2. Same for `action_postprocessor` + `safety_guard` against `_apply_action`, including the hole-frame clamp.
+3. Check the force sign and frame. With the plug pressed by hand in +x of the plug frame, the real
+   `force_K_debug` must match the sim contact-sensor sign.
+
+### 4.5 Ground-truth success: electrical enumeration
+Wire the receptacle's back side to the host PC and put a USB device (e.g. a flash drive) on the
+cord's far end. A udev/`lsusb` watcher then labels a seat automatically and objectively. This removes
+the operator verdict and the seat-detection problem seen with the τ_ext-only approach. The runner's
+`s/f` prompt can be replaced by this watcher with a small optional hook.
+
+---
+
+## 5. Bench test ladder (shared with cable-assembly `RL_test_campaign.md`)
+
+| Step | Condition | Exit criterion |
+| --- | --- | --- |
+| R0 | Shim + impedance only: hover, 1-step, dry run above the hole (`--max-steps 1`) | Pose tracking < 0.5 mm, no wrist swing |
+| R1 | USB-III pose-only, taught target, fixture grasp, start ±5 mm | ≥ 18/20 seats |
+| R2 | Same, `--random-start` ±10 mm, twist ±10° | ≥ 17/20 |
+| R3 | Injected target bias (annulus 2 / 4 mm), then the pose6d target | Success-vs-bias curve vs. the sim curve (§3.5) |
+| R4 | Force variant (only if R2/R3 < 80%); compare with Newton P1 on identical starts | Report both |
+
+Log every run with the runner's `steps.jsonl` / `episodes.csv` plus the shim's 100 Hz `motion.csv`.
+
+---
+
+## 6. Measurements needed (from cable-assembly's M1–M7 list; only these gate this plan)
+- **M1** wrench noise and bias vs. speed, gating §3.4.
+- **M2** socket pose error, 10 teach vs. pose6d pairs, gating R3.
+- **M3** in-hand error vs. ground truth, gating `held_asset_pos_range`.
+- **M4** latch force (push-in force on a load cell or the arm at a slow creep), gating the detent DR and
+  the force caps.
+- **M5** 2F-85 slip force on the overmold at the chosen `force_counts`, gating the force penalty.
+- **New:** M8, the impedance step response (§4.2).
+
+---
+
+## 7. Work breakdown and order
+
+| Week | Deliverable | Repo |
+| --- | --- | --- |
+| 1 | USB asset builder + USB-I..IV USDs + drop-test; M4, M5 | here |
+| 1–2 | iiwa+2F-85 robot cfg; hole-frame clamp + regression test; USB-I training green | here |
+| 2 | HTTP shim + KUKA impedance; R0; M8 system ID; M1 | cable-assembly |
+| 2–3 | Gain DR retuned from M8; USB-II → III curriculum; bias sweep | here |
+| 3 | Plug cradle; in-hand `T_AT` correction; M3; parity checks; USB enumeration watcher | both |
+| 4 | R1 → R2 → R3 | bench |
+| 5 | Force variant if needed (R4); USB-IV eval; write-up | here |
+
+### Risks
+- **PhysX SDF at a 0.04 mm tongue gap** may jitter or tunnel. Mitigation: train on III (tongue relieved).
+  IV is evaluation only.
+- **iiwa reach/joint margins** at the pegboard pose: the Newton runner already lost the re-aim
+  back-out at the 20° grasp. Check that `reset_joints` and the start box stay ≥ 10° from limits in sim
+  *before* training, with the cell's `joint_limit_margin_deg`.
+- **KUKA impedance + POSITION command through FRI** adds latency over Franka SERL. Model it with a
+  0–1 step action delay in DR, as Newton does.
+- **Two parallel stacks** compete for bench time. Share the R-ladder, starts and logs so the
+  comparison is free.

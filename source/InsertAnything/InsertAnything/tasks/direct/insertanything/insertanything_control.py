@@ -1,8 +1,9 @@
 import math
 
-import isaacsim.core.utils.torch as torch_utils
 import torch
-from isaaclab.utils.math import axis_angle_from_quat
+
+from . import insertanything_math as torch_utils
+from .insertanything_math import axis_angle_from_quat
 
 
 def get_pose_error(
@@ -66,6 +67,19 @@ def _apply_task_space_gains(
     return task_wrench
 
 
+_LAMBDA_D_CACHE = {}
+
+
+def _desired_task_inertia(cfg, device):
+    """``cfg.ctrl.desired_task_inertia``: 6 numbers (diagonal) or 36 (row-major), task frame [kg, kg m^2]."""
+    vals = tuple(cfg.ctrl.desired_task_inertia)
+    key = (vals, str(device))
+    if key not in _LAMBDA_D_CACHE:
+        t = torch.tensor(vals, dtype=torch.float32, device=device)
+        _LAMBDA_D_CACHE[key] = torch.diag(t) if t.numel() == 6 else t.reshape(6, 6)
+    return _LAMBDA_D_CACHE[key]
+
+
 def compute_dof_torque(
     cfg,
     dof_pos,
@@ -82,8 +96,14 @@ def compute_dof_torque(
     task_deriv_gains,
     device,
     dead_zone_thresholds=None,
+    external_wrench=None,
+    bias_wrench=None,
 ):
-    """Compute Franka joint torques using operational-space control."""
+    """Compute arm joint torques using operational-space control (J^T F, null-space posture).
+
+    ``external_wrench``: the environment's wrench on the fingertip, task frame (only for
+    ``ctrl.inertia_shaping == "nominal_fext"``). ``bias_wrench``: added to the applied wrench as it is
+    (feed-forward, e.g. payload gravity compensation), task frame."""
     num_envs = cfg.scene.num_envs
     dof_torque = torch.zeros((num_envs, dof_pos.shape[1]), device=device)
     task_wrench = torch.zeros((num_envs, 6), device=device)
@@ -114,11 +134,41 @@ def compute_dof_torque(
         )
 
     jacobian_t = torch.transpose(jacobian, dim0=1, dim1=2)
-    dof_torque[:, 0:7] = (jacobian_t @ task_wrench.unsqueeze(-1)).squeeze(-1)
-
     arm_mass_matrix_inv = torch.inverse(arm_mass_matrix)
     arm_mass_matrix_task = torch.inverse(jacobian @ arm_mass_matrix_inv @ jacobian_t)
     j_eef_inv = arm_mass_matrix_task @ jacobian @ arm_mass_matrix_inv
+
+    # Inertia shaping: make this arm's fingertip respond to the task wrench as an arm with task-space
+    # inertia ``desired_task_inertia`` would (the arm the policy was trained on). With Lambda the arm's own
+    # task inertia and Lambda_d the desired one, Lambda * a = F_applied + F_ext, so
+    #   "nominal":      F_applied = Lambda Lambda_d^-1 F                    exact in free space
+    #   "nominal_fext": F_applied = Lambda Lambda_d^-1 (F + F_ext) - F_ext   exact in contact too
+    #   "nominal_trans": "nominal" on the translational 3x3 block only
+    # ("nominal" alone leaves contact Lambda Lambda_d^-1 times stiffer than the reference arm.)
+    shaping = getattr(cfg.ctrl, "inertia_shaping", "none")
+    applied_wrench = task_wrench
+    if shaping != "none":
+        lam_d = _desired_task_inertia(cfg, device)
+        ratio = arm_mass_matrix_task @ torch.inverse(lam_d).unsqueeze(0) if shaping != "nominal_trans" else None
+        if shaping == "nominal":
+            applied_wrench = (ratio @ task_wrench.unsqueeze(-1)).squeeze(-1)
+        elif shaping == "nominal_trans":
+            # Translation only. The controller holds roll/pitch stiffly, so the fingertip's translational
+            # response is governed by Lambda's 3x3 translational block (fit from trajectories:
+            # scripts/diagnostics/fit_apparent_inertia.py). F' = Lambda_tt Lambda_d,tt^-1 F gives this arm
+            # the reference arm's force-to-acceleration map, its x-y-z coupling included; rotation stays
+            # the arm's own, and no torque leaks into force through translation-rotation coupling terms.
+            ratio_t = arm_mass_matrix_task[:, 0:3, 0:3] @ torch.inverse(lam_d[0:3, 0:3]).unsqueeze(0)
+            applied_wrench = task_wrench.clone()
+            applied_wrench[:, 0:3] = (ratio_t @ task_wrench[:, 0:3].unsqueeze(-1)).squeeze(-1)
+        elif shaping == "nominal_fext":
+            f_ext = external_wrench if external_wrench is not None else torch.zeros_like(task_wrench)
+            applied_wrench = (ratio @ (task_wrench + f_ext).unsqueeze(-1)).squeeze(-1) - f_ext
+        else:
+            raise ValueError(f"Unknown inertia_shaping: {shaping}")
+    if bias_wrench is not None:
+        applied_wrench = applied_wrench + bias_wrench
+    dof_torque[:, 0:7] = (jacobian_t @ applied_wrench.unsqueeze(-1)).squeeze(-1)
 
     default_dof_pos = torch.tensor(cfg.ctrl.default_dof_pos_tensor, device=device).repeat((num_envs, 1))
     distance_to_default_dof_pos = default_dof_pos - dof_pos[:, :7]

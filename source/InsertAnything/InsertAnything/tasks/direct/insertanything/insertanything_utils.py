@@ -1,6 +1,8 @@
-import isaacsim.core.utils.torch as torch_utils
 import numpy as np
 import torch
+
+from . import insertanything_compat as compat
+from . import insertanything_math as torch_utils
 
 
 def get_keypoint_offsets(num_keypoints, device):
@@ -25,32 +27,13 @@ def wrap_yaw(angle):
 def set_friction(asset, value, env_ids, device="cpu"):
     """Set static and dynamic friction for all shapes in selected environments."""
     del device
-    materials = asset.root_physx_view.get_material_properties()
-
-    if isinstance(env_ids, int):
-        env_ids_cpu = torch.arange(env_ids, device="cpu")
-    else:
-        env_ids_cpu = env_ids.to("cpu") if isinstance(env_ids, torch.Tensor) else torch.tensor(env_ids, device="cpu")
-
-    if isinstance(value, torch.Tensor):
-        val_cpu = value.to("cpu")
-        if val_cpu.dim() == 1:
-            val_cpu = val_cpu.unsqueeze(-1)
-        materials[env_ids_cpu, :, 0] = val_cpu
-        materials[env_ids_cpu, :, 1] = val_cpu
-    else:
-        materials[env_ids_cpu, :, 0] = value
-        materials[env_ids_cpu, :, 1] = value
-
-    asset.root_physx_view.set_material_properties(materials, env_ids_cpu)
+    compat.set_friction(asset, value, env_ids)
 
 
 def set_body_inertias(robot, num_envs):
     """Add a small diagonal inertia offset for simulation stability."""
-    inertias = robot.root_physx_view.get_inertias()
-    offset = torch.zeros_like(inertias)
-    offset[:, :, [0, 4, 8]] += 0.01
-    robot.root_physx_view.set_inertias(inertias + offset, torch.arange(num_envs))
+    del num_envs
+    compat.add_body_inertia(robot, 0.01)
 
 
 def get_held_base_pos_local(num_envs, device):
@@ -113,6 +96,12 @@ def get_closest_symmetry_transform(held_quat, target_quat, symmetry_angles: list
     """Return the nearest symmetry-equivalent target orientation."""
     _, _, held_yaw = torch_utils.get_euler_xyz(held_quat)
     roll, pitch, target_yaw = torch_utils.get_euler_xyz(target_quat)
+    # get_euler_xyz wraps to [0, 2*pi). An upright hole's roll/pitch of -1e-9 (rounding after any frame
+    # change) would come back as 2*pi - 1e-9 and flip the sign of the rebuilt quaternion -- and with it the
+    # policy's fingertip_quat_rel_fixed input. Wrap to (-pi, pi]: exact zeros (the released training
+    # setup) are unchanged, and +-eps stay continuous.
+    roll = (roll + np.pi) % (2 * np.pi) - np.pi
+    pitch = (pitch + np.pi) % (2 * np.pi) - np.pi
 
     all_errors = []
     all_target_yaws = []

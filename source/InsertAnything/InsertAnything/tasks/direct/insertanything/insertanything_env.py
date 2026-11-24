@@ -2,20 +2,16 @@ from __future__ import annotations
 
 import os
 
-import carb
 import isaaclab.sim as sim_utils
-import isaacsim.core.utils.torch as torch_utils
 import numpy as np
 import torch
-from isaaclab.assets import Articulation
 from isaaclab.envs import DirectRLEnv
 from isaaclab.markers import VisualizationMarkers, VisualizationMarkersCfg
-from isaaclab.sensors import ContactSensor
-from isaaclab.sim.spawners.from_files import GroundPlaneCfg, spawn_ground_plane
-from isaaclab.utils.assets import ISAAC_NUCLEUS_DIR
-from isaaclab.utils.math import axis_angle_from_quat
 
+from . import insertanything_compat as compat
 from . import insertanything_control, insertanything_utils
+from . import insertanything_math as torch_utils
+from .insertanything_math import axis_angle_from_quat
 from .insertanything_env_cfg import OBS_DIM_CFG, STATE_DIM_CFG, InsertAnythingEnvCfg
 from .tactile_datalogger import CSVDataLogger
 
@@ -48,32 +44,8 @@ class InsertAnythingEnv(DirectRLEnv):
             print(f"[WARN] Failed to set hole view camera: {e}")
 
     def _setup_scene(self):
-        spawn_ground_plane(
-            prim_path="/World/ground",
-            cfg=GroundPlaneCfg(),
-            translation=(0.0, 0.0, -1.05),
-        )
-
-        cfg = sim_utils.UsdFileCfg(usd_path=f"{ISAAC_NUCLEUS_DIR}/Props/Mounts/SeattleLabTable/table_instanceable.usd")
-        cfg.func(
-            "/World/envs/env_.*/Table",
-            cfg,
-            translation=(0.55, 0.0, 0.0),
-            orientation=(0.70711, 0.0, 0.0, 0.70711),
-        )
-
-        self._robot = Articulation(self.cfg.robot)
-        self._held_asset = Articulation(self.cfg_task.held_asset)
-        self._fixed_asset = Articulation(self.cfg_task.fixed_asset)
-        self.scene.articulations["fixed_asset"] = self._fixed_asset
-
-        self.scene.clone_environments(copy_from_source=False)
-        if self.device == "cpu":
-            self.scene.filter_collisions()
-
-        self.scene.articulations["robot"] = self._robot
-        self.scene.articulations["held_asset"] = self._held_asset
-
+        # Ground, table, light, robot, the two assets and the contact sensor are declared on the scene
+        # config (InsertAnythingSceneCfg); only the debug camera and markers are made here.
         self.hole_view_camera_path = None
         if self._enable_hole_view_camera():
             self.hole_view_camera_path = "/World/HoleViewCamera"
@@ -114,13 +86,6 @@ class InsertAnythingEnv(DirectRLEnv):
         else:
             self.target_markers = None
 
-        contact_cfg = getattr(self.cfg_task, "contact_force", {})
-        if contact_cfg.get("enabled", False):
-            self.contact_sensor = ContactSensor(self.cfg.contact_sensor)
-            self.scene.sensors["contact_sensor"] = self.contact_sensor
-
-        light_cfg = sim_utils.DomeLightCfg(intensity=2000.0, color=(0.75, 0.75, 0.75))
-        light_cfg.func("/World/Light", light_cfg)
 
     def _set_default_dynamics_parameters(self):
         self.default_gains = torch.tensor(
@@ -157,9 +122,52 @@ class InsertAnythingEnv(DirectRLEnv):
         self.init_fingertip_quat_obs_noise = torch.zeros((self.num_envs, 4), device=self.device)
         self.init_fingertip_quat_obs_noise[:, 0] = 1.0
 
-        self.left_finger_body_idx = self._robot.body_names.index("panda_leftfinger")
-        self.right_finger_body_idx = self._robot.body_names.index("panda_rightfinger")
-        self.fingertip_body_idx = self._robot.body_names.index("panda_fingertip_centered")
+        robot_cfg = self.cfg_task.robot_cfg
+        self.arm_joint_ids, names = self._robot.find_joints(list(robot_cfg.arm_joint_names), preserve_order=True)
+        assert list(names) == list(robot_cfg.arm_joint_names), names
+        self.gripper_joint_ids, names = self._robot.find_joints(
+            list(robot_cfg.gripper_joint_names), preserve_order=True
+        )
+        assert list(names) == list(robot_cfg.gripper_joint_names), names
+        self.arm_joint_ids = torch.tensor(self.arm_joint_ids, dtype=torch.long, device=self.device)
+        self.gripper_joint_ids = torch.tensor(self.gripper_joint_ids, dtype=torch.long, device=self.device)
+        # The env works in "ordered" joint space: the arm (0:7) then the gripper (7:). Writes map back.
+        self._joint_order = torch.cat((self.arm_joint_ids, self.gripper_joint_ids))
+        assert len(self._joint_order) == self._robot.num_joints, (
+            f"arm + gripper joints ({len(self._joint_order)}) must cover all {self._robot.num_joints} joints"
+        )
+        self._joint_order_inv = torch.argsort(self._joint_order)
+        if robot_cfg.gripper_type == "robotiq_2f85":
+            self.gripper_closed_pos = robot_cfg.gripper_close_rad * torch.tensor(
+                robot_cfg.gripper_joint_signs, dtype=torch.float32, device=self.device
+            )
+        else:
+            self.gripper_closed_pos = torch.zeros(len(robot_cfg.gripper_joint_names), device=self.device)
+        # A fixed base has no Jacobian row for its root body; DOF columns follow the joint order.
+        self._jac_body_offset = 1 if self._robot.is_fixed_base else 0
+        self._jac_cols = self.arm_joint_ids + (0 if self._robot.is_fixed_base else 6)
+
+        self.left_finger_body_idx = self._robot.body_names.index(robot_cfg.finger_bodies[0])
+        self.right_finger_body_idx = self._robot.body_names.index(robot_cfg.finger_bodies[1])
+        self.fingertip_body_idx = self._robot.body_names.index(robot_cfg.fingertip_body)
+        self.fingertip_offset = (
+            torch.tensor(robot_cfg.fingertip_offset, dtype=torch.float32, device=self.device)
+            .unsqueeze(0)
+            .repeat(self.num_envs, 1)
+        )
+
+        # Task frame (cell_rotation_wxyz): every read is rotated into it, every pose write out of it.
+        q_cell = torch.tensor(self.cfg_task.cell_rotation_wxyz, dtype=torch.float32, device=self.device)
+        q_cell = q_cell / torch.linalg.vector_norm(q_cell)
+        self._cell_is_identity = bool(
+            torch.allclose(q_cell, torch.tensor([1.0, 0.0, 0.0, 0.0], device=self.device))
+        ) and not os.environ.get("INSERTANYTHING_FORCE_TASK_FRAME_MATH")
+        self._q_cell = q_cell.unsqueeze(0).repeat(self.num_envs, 1)
+        self._q_cell_inv = torch_utils.quat_conjugate(self._q_cell)
+        self._R_cell_inv = torch.stack(
+            [torch_utils.quat_apply(self._q_cell_inv, e.repeat(self.num_envs, 1)) for e in torch.eye(3, device=self.device)],
+            dim=-1,
+        )  # (N, 3, 3): columns are the base axes in the task frame
 
         self.last_update_timestamp = 0.0
         self.prev_fingertip_pos = torch.zeros((self.num_envs, 3), device=self.device)
@@ -257,6 +265,9 @@ class InsertAnythingEnv(DirectRLEnv):
         cfg.state_space += cfg.action_space
 
         super().__init__(cfg, render_mode, **kwargs)
+        self._robot = self.scene["robot"]
+        self._fixed_asset = self.scene["fixed_asset"]
+        self._held_asset = self.scene["held_asset"]
         insertanything_utils.set_body_inertias(self._robot, self.scene.num_envs)
         self._init_tensors()
         self._set_default_dynamics_parameters()
@@ -274,11 +285,31 @@ class InsertAnythingEnv(DirectRLEnv):
             log_directory = os.path.join(os.path.dirname(__file__), "contact_force_logs")
             self.contact_force_logger = CSVDataLogger(task_name=self.cfg_task.name, log_dir=log_directory)
 
+    def _vec_to_task(self, v, env_ids=None):
+        if self._cell_is_identity:
+            return v
+        q = self._q_cell_inv if env_ids is None else self._q_cell_inv[env_ids]
+        return torch_utils.quat_apply(q, v)
+
+    def _quat_to_task(self, quat, env_ids=None):
+        if self._cell_is_identity:
+            return quat
+        q = self._q_cell_inv if env_ids is None else self._q_cell_inv[env_ids]
+        return torch_utils.quat_mul(q, quat)
+
+    def _pose_from_task(self, pos, quat, env_ids=None):
+        """Task-frame pose -> base-frame pose (env-local, i.e. without env_origins)."""
+        if self._cell_is_identity:
+            return pos, quat
+        q = self._q_cell if env_ids is None else self._q_cell[env_ids]
+        return torch_utils.quat_apply(q, pos), torch_utils.quat_mul(q, quat)
+
     def _compute_intermediate_values(self):
         current_sim_time = self._robot._data._sim_timestamp
         actual_dt = current_sim_time - self.last_update_timestamp
-        board_pos = self._fixed_asset.data.root_pos_w - self.scene.env_origins
-        board_quat = self._fixed_asset.data.root_quat_w
+        board_pos, board_quat = compat.root_pose(self._fixed_asset)
+        board_pos = self._vec_to_task(board_pos - self.scene.env_origins)
+        board_quat = self._quat_to_task(board_quat)
 
         self.fixed_quat, self.fixed_pos = torch_utils.tf_combine(
             board_quat,
@@ -287,22 +318,60 @@ class InsertAnythingEnv(DirectRLEnv):
             self.target_hole_local_pos,
         )
 
-        self.held_pos = self._held_asset.data.root_pos_w - self.scene.env_origins
-        self.held_quat = self._held_asset.data.root_quat_w
+        held_pos_w, held_quat_w = compat.root_pose(self._held_asset)
+        self.held_pos = self._vec_to_task(held_pos_w - self.scene.env_origins)
+        self.held_quat = self._quat_to_task(held_quat_w)
 
-        self.fingertip_midpoint_pos = self._robot.data.body_pos_w[:, self.fingertip_body_idx] - self.scene.env_origins
-        self.fingertip_midpoint_quat = self._robot.data.body_quat_w[:, self.fingertip_body_idx]
-        self.fingertip_midpoint_linvel = self._robot.data.body_lin_vel_w[:, self.fingertip_body_idx]
-        self.fingertip_midpoint_angvel = self._robot.data.body_ang_vel_w[:, self.fingertip_body_idx]
+        tip_body_pos, tip_body_quat = compat.body_pose(self._robot, self.fingertip_body_idx)
+        tip_body_linvel, tip_body_angvel = compat.body_vel(self._robot, self.fingertip_body_idx)
+        tip_offset_w = torch_utils.quat_apply(tip_body_quat, self.fingertip_offset)
+        self.fingertip_midpoint_pos = self._vec_to_task(tip_body_pos + tip_offset_w - self.scene.env_origins)
+        self.fingertip_midpoint_quat = self._quat_to_task(tip_body_quat)
+        if self.cfg_task.robot_cfg.canonicalize_fingertip_quat:
+            self.fingertip_midpoint_quat = torch.where(
+                self.fingertip_midpoint_quat[:, 1:2] < 0, -self.fingertip_midpoint_quat, self.fingertip_midpoint_quat
+            )
+        self.fingertip_midpoint_linvel = self._vec_to_task(
+            tip_body_linvel + torch.cross(tip_body_angvel, tip_offset_w, dim=-1)
+        )
+        self.fingertip_midpoint_angvel = self._vec_to_task(tip_body_angvel)
 
-        jacobians = self._robot.root_physx_view.get_jacobians()
-
-        self.left_finger_jacobian = jacobians[:, self.left_finger_body_idx - 1, 0:6, 0:7]
-        self.right_finger_jacobian = jacobians[:, self.right_finger_body_idx - 1, 0:6, 0:7]
-        self.fingertip_midpoint_jacobian = (self.left_finger_jacobian + self.right_finger_jacobian) * 0.5
-        self.arm_mass_matrix = self._robot.root_physx_view.get_generalized_mass_matrices()[:, 0:7, 0:7]
-        self.joint_pos = self._robot.data.joint_pos.clone()
-        self.joint_vel = self._robot.data.joint_vel.clone()
+        jacobians = compat.jacobians(self._robot)[:, :, :, self._jac_cols]
+        if self.cfg_task.robot_cfg.jacobian_mode == "finger_average":
+            self.left_finger_jacobian = jacobians[:, self.left_finger_body_idx - self._jac_body_offset]
+            self.right_finger_jacobian = jacobians[:, self.right_finger_body_idx - self._jac_body_offset]
+            self.fingertip_midpoint_jacobian = (self.left_finger_jacobian + self.right_finger_jacobian) * 0.5
+        else:
+            # Jacobian of the fingertip point: v_p = v_body + w x r, so J_lin -= [r]x J_ang.
+            jac = jacobians[:, self.fingertip_body_idx - self._jac_body_offset]
+            r = tip_offset_w
+            zero = torch.zeros_like(r[:, 0])
+            r_skew = torch.stack(
+                (
+                    torch.stack((zero, -r[:, 2], r[:, 1]), dim=-1),
+                    torch.stack((r[:, 2], zero, -r[:, 0]), dim=-1),
+                    torch.stack((-r[:, 1], r[:, 0], zero), dim=-1),
+                ),
+                dim=1,
+            )
+            jac_lin = jac[:, 0:3] - r_skew @ jac[:, 3:6]
+            self.fingertip_midpoint_jacobian = torch.cat((jac_lin, jac[:, 3:6]), dim=1)
+        # Task-frame Jacobian: tau = J^T F is frame-independent when J and F share the frame.
+        J = self.fingertip_midpoint_jacobian
+        if not self._cell_is_identity:
+            # Elementwise multiply-sum, not `@`: a TF32 matmul (Ampere) costs ~1e-3 relative error here.
+            R = self._R_cell_inv.unsqueeze(-1)  # (N, 3, 3, 1)
+            jac_lin = (R * J[:, 0:3].unsqueeze(1)).sum(dim=2)
+            jac_ang = (R * J[:, 3:6].unsqueeze(1)).sum(dim=2)
+            self.fingertip_midpoint_jacobian = torch.cat((jac_lin, jac_ang), dim=1)
+        mass = compat.mass_matrix(self._robot)
+        mass_cols = self.arm_joint_ids + (0 if self._robot.is_fixed_base else 6)
+        self.arm_mass_matrix = mass[:, mass_cols][:, :, mass_cols]
+        # Arm joints first (in arm_joint_names order), then the gripper joints, so 0:7 means the arm.
+        full_joint_pos = compat.joint_pos(self._robot)
+        full_joint_vel = compat.joint_vel(self._robot)
+        self.joint_pos = full_joint_pos[:, self._joint_order].clone()
+        self.joint_vel = full_joint_vel[:, self._joint_order].clone()
 
         if actual_dt > 1e-5:
             self.ee_linvel_fd = (self.fingertip_midpoint_pos - self.prev_fingertip_pos) / actual_dt
@@ -327,9 +396,9 @@ class InsertAnythingEnv(DirectRLEnv):
         contact_cfg = getattr(self.cfg_task, "contact_force", {})
         if contact_cfg.get("enabled", False):
             contact_sensor = self.scene.sensors["contact_sensor"]
-            net_forces_w = contact_sensor.data.net_forces_w
+            net_forces_w = compat.net_contact_forces(contact_sensor)
 
-            total_force_w = torch.sum(net_forces_w, dim=1)
+            total_force_w = self._vec_to_task(torch.sum(net_forces_w, dim=1))
 
             q_inv = torch_utils.quat_conjugate(self.held_quat)
             total_force_local = torch_utils.quat_apply(q_inv, total_force_w)
@@ -406,14 +475,15 @@ class InsertAnythingEnv(DirectRLEnv):
         base_perceived_fingertip_quat = torch_utils.quat_mul(self.init_fingertip_quat_obs_noise, clean_fingertip_quat)
 
         if getattr(self, "target_markers", None) is not None:
-            true_pos_w = self.fixed_pos_obs_frame + self.scene.env_origins
-            perceived_pos_w = base_perceived_hole_pos + self.scene.env_origins
+            ident = self._q_cell[:, :1] * 0 + torch.tensor([[1.0, 0.0, 0.0, 0.0]], device=self.device)
+            true_pos_w = self._pose_from_task(self.fixed_pos_obs_frame, ident)[0] + self.scene.env_origins
+            perceived_pos_w = self._pose_from_task(base_perceived_hole_pos, ident)[0] + self.scene.env_origins
 
-            fingertip_pos_w = clean_fingertip_pos + self.scene.env_origins
+            fingertip_pos_w = self._pose_from_task(clean_fingertip_pos, ident)[0] + self.scene.env_origins
 
             marker_locations = torch.cat([true_pos_w, perceived_pos_w, fingertip_pos_w], dim=0)
 
-            marker_orientations = torch.tensor([1.0, 0.0, 0.0, 0.0], device=self.device).repeat(3, 1)
+            marker_orientations = torch.tensor([0.0, 0.0, 0.0, 1.0], device=self.device).repeat(3, 1)
 
             marker_indices = torch.tensor([0, 1, 2], dtype=torch.int32, device=self.device)
 
@@ -566,13 +636,41 @@ class InsertAnythingEnv(DirectRLEnv):
             task_deriv_gains=self.task_deriv_gains,
             device=self.device,
             dead_zone_thresholds=self.dead_zone_thresholds,
+            external_wrench=self._fingertip_external_wrench(),
+            bias_wrench=self._payload_gravity_wrench(),
         )
 
-        self.ctrl_target_joint_pos[:, 7:9] = ctrl_target_gripper_dof_pos
-        self.joint_torque[:, 7:9] = 0.0
+        self.ctrl_target_joint_pos[:, 7:] = ctrl_target_gripper_dof_pos
+        self.joint_torque[:, 7:] = 0.0
 
-        self._robot.set_joint_position_target(self.ctrl_target_joint_pos)
-        self._robot.set_joint_effort_target(self.joint_torque)
+        compat.set_joint_position_target(self._robot, self.ctrl_target_joint_pos[:, self._joint_order_inv])
+        compat.set_joint_effort_target(self._robot, self.joint_torque[:, self._joint_order_inv])
+
+    def _payload_gravity_wrench(self):
+        """m (g_ref - g_task): the held asset's weight moved onto task -z (see CtrlCfg.payload_gravity_comp)."""
+        if not getattr(self.cfg.ctrl, "payload_gravity_comp", False) or getattr(self, "_gravity_off", False):
+            return None
+        if not hasattr(self, "_payload_bias"):
+            g_world = torch.tensor(self.cfg.sim.gravity, dtype=torch.float32, device=self.device)
+            g_task = self._vec_to_task(g_world.unsqueeze(0).repeat(self.num_envs, 1))
+            g_ref = torch.zeros_like(g_task)
+            g_ref[:, 2] = -float(torch.linalg.vector_norm(g_world))
+            self._payload_bias = torch.zeros((self.num_envs, 6), device=self.device)
+            self._payload_bias[:, 0:3] = self.cfg_task.held_asset_cfg.mass * (g_ref - g_task)
+        return self._payload_bias
+
+    def _fingertip_external_wrench(self):
+        """The held asset's force on the fingers, task frame (force only), for inertia shaping with
+        external-force feedback. The real arm's counterpart is the estimated external wrench."""
+        if getattr(self.cfg.ctrl, "inertia_shaping", "none") != "nominal_fext":
+            return None
+        sensor = self.scene.sensors.get("contact_sensor") if hasattr(self.scene, "sensors") else None
+        wrench = torch.zeros((self.num_envs, 6), device=self.device)
+        if sensor is None or sensor.data.force_matrix_w is None:
+            return wrench
+        on_held_from_fingers = compat.t(sensor.data.force_matrix_w).sum(dim=(1, 2))
+        wrench[:, 0:3] = -self._vec_to_task(on_held_from_fingers)
+        return wrench
 
     def close_gripper_in_place(self):
         actions = torch.zeros((self.num_envs, 6), device=self.device)
@@ -605,7 +703,7 @@ class InsertAnythingEnv(DirectRLEnv):
         self.generate_ctrl_signals(
             ctrl_target_fingertip_midpoint_pos=ctrl_target_fingertip_midpoint_pos,
             ctrl_target_fingertip_midpoint_quat=ctrl_target_fingertip_midpoint_quat,
-            ctrl_target_gripper_dof_pos=0.0,
+            ctrl_target_gripper_dof_pos=self.gripper_closed_pos,
         )
 
     def _apply_action(self):
@@ -648,7 +746,7 @@ class InsertAnythingEnv(DirectRLEnv):
         self.generate_ctrl_signals(
             ctrl_target_fingertip_midpoint_pos=ctrl_target_fingertip_midpoint_pos,
             ctrl_target_fingertip_midpoint_quat=ctrl_target_fingertip_midpoint_quat,
-            ctrl_target_gripper_dof_pos=0.0,
+            ctrl_target_gripper_dof_pos=self.gripper_closed_pos,
         )
 
     def _get_dones(self):
@@ -970,19 +1068,12 @@ class InsertAnythingEnv(DirectRLEnv):
         self._reset_contact_force_input_randomization(env_ids)
 
     def _set_assets_to_default_pose(self, env_ids):
-        held_state = self._held_asset.data.default_root_state.clone()[env_ids]
-        held_state[:, 0:3] += self.scene.env_origins[env_ids]
-        held_state[:, 7:] = 0.0
-        self._held_asset.write_root_pose_to_sim(held_state[:, 0:7], env_ids=env_ids)
-        self._held_asset.write_root_velocity_to_sim(held_state[:, 7:], env_ids=env_ids)
-        self._held_asset.reset()
-
-        fixed_state = self._fixed_asset.data.default_root_state.clone()[env_ids]
-        fixed_state[:, 0:3] += self.scene.env_origins[env_ids]
-        fixed_state[:, 7:] = 0.0
-        self._fixed_asset.write_root_pose_to_sim(fixed_state[:, 0:7], env_ids=env_ids)
-        self._fixed_asset.write_root_velocity_to_sim(fixed_state[:, 7:], env_ids=env_ids)
-        self._fixed_asset.reset()
+        for asset in (self._held_asset, self._fixed_asset):
+            pose = compat.default_root_pose(asset)[env_ids]
+            pose[:, 0:3] += self.scene.env_origins[env_ids]
+            compat.write_root_pose(asset, pose, env_ids=env_ids)
+            compat.write_root_velocity(asset, torch.zeros((len(env_ids), 6), device=self.device), env_ids=env_ids)
+            asset.reset()
 
     def set_pos_inverse_kinematics(
         self,
@@ -1013,8 +1104,9 @@ class InsertAnythingEnv(DirectRLEnv):
             self.joint_vel[env_ids, :] = torch.zeros_like(self.joint_pos[env_ids,])
 
             self.ctrl_target_joint_pos[env_ids, 0:7] = self.joint_pos[env_ids, 0:7]
-            self._robot.write_joint_state_to_sim(self.joint_pos, self.joint_vel)
-            self._robot.set_joint_position_target(self.ctrl_target_joint_pos)
+            inv = self._joint_order_inv
+            compat.write_joint_state(self._robot, self.joint_pos[:, inv], self.joint_vel[:, inv])
+            compat.set_joint_position_target(self._robot, self.ctrl_target_joint_pos[:, inv])
 
             self.step_sim_no_action()
             ik_time += self.physics_dt
@@ -1024,8 +1116,12 @@ class InsertAnythingEnv(DirectRLEnv):
     def get_handheld_asset_relative_pose(self):
 
         held_asset_relative_pos = torch.zeros((self.num_envs, 3), device=self.device)
-        held_asset_relative_pos[:, 2] = self.cfg_task.held_asset_cfg.height
-        held_asset_relative_pos[:, 2] -= self.cfg_task.robot_cfg.franka_fingerpad_length
+        grasp_pos = getattr(self.cfg_task.held_asset_cfg, "grasp_pos", None)
+        if grasp_pos is not None:
+            held_asset_relative_pos[:] = torch.tensor(grasp_pos, dtype=torch.float32, device=self.device)
+        else:
+            held_asset_relative_pos[:, 2] = self.cfg_task.held_asset_cfg.height
+            held_asset_relative_pos[:, 2] -= self.cfg_task.robot_cfg.franka_fingerpad_length
 
         held_asset_relative_quat = (
             torch.tensor([1.0, 0.0, 0.0, 0.0], device=self.device).unsqueeze(0).repeat(self.num_envs, 1)
@@ -1036,17 +1132,24 @@ class InsertAnythingEnv(DirectRLEnv):
         return held_asset_relative_pos, held_asset_relative_quat
 
     def _set_franka_to_default_pose(self, joints, env_ids):
-        gripper_width = self.cfg_task.held_asset_cfg.diameter / 2 * 1.25
-        joint_pos = self._robot.data.default_joint_pos[env_ids]
-        joint_pos[:, 7:] = gripper_width
+        joint_pos = compat.default_joint_pos(self._robot)[env_ids][:, self._joint_order].clone()
+        if self.cfg_task.robot_cfg.gripper_type == "franka":
+            joint_pos[:, 7:] = self.cfg_task.held_asset_cfg.diameter / 2 * 1.25
+        else:
+            # Open only to just wider than the held asset (as the Franka's diameter * 1.25), so the
+            # 1 rad/s 2F-85 drive closes on it within the reset's grasp window.
+            joint_pos[:, 7:] = self.cfg_task.robot_cfg.gripper_pregrasp_rad * self.gripper_closed_pos / max(
+                self.cfg_task.robot_cfg.gripper_close_rad, 1e-6
+            )
         joint_pos[:, :7] = torch.tensor(joints, device=self.device)[None, :]
         joint_vel = torch.zeros_like(joint_pos)
         joint_effort = torch.zeros_like(joint_pos)
         self.ctrl_target_joint_pos[env_ids, :] = joint_pos
-        self._robot.set_joint_position_target(self.ctrl_target_joint_pos[env_ids], env_ids=env_ids)
-        self._robot.write_joint_state_to_sim(joint_pos, joint_vel, env_ids=env_ids)
+        inv = self._joint_order_inv
+        compat.set_joint_position_target(self._robot, self.ctrl_target_joint_pos[env_ids][:, inv], env_ids=env_ids)
+        compat.write_joint_state(self._robot, joint_pos[:, inv], joint_vel[:, inv], env_ids=env_ids)
         self._robot.reset()
-        self._robot.set_joint_effort_target(joint_effort, env_ids=env_ids)
+        compat.set_joint_effort_target(self._robot, joint_effort[:, inv], env_ids=env_ids)
 
         self.step_sim_no_action()
 
@@ -1058,10 +1161,12 @@ class InsertAnythingEnv(DirectRLEnv):
 
     def randomize_initial_state(self, env_ids):
         correction_mode = bool(getattr(self, "correction_field_mode", False))
-        physics_sim_view = sim_utils.SimulationContext.instance().physics_sim_view
-        physics_sim_view.set_gravity(carb.Float3(0.0, 0.0, 0.0))
+        compat.set_gravity(self.sim, (0.0, 0.0, 0.0))
+        self._gravity_off = True
 
-        fixed_state = self._fixed_asset.data.default_root_state.clone()[env_ids]
+        # Nominal pose in the task frame; randomization below is in the task frame (hole axis = z).
+        fixed_state = compat.default_root_pose(self._fixed_asset)[env_ids]
+        fixed_state[:, 0:3] = self._vec_to_task(fixed_state[:, 0:3], env_ids)
 
         rand_sample = torch.rand((len(env_ids), 3), dtype=torch.float32, device=self.device)
         fixed_pos_init_rand = 2 * (rand_sample - 0.5)
@@ -1075,7 +1180,7 @@ class InsertAnythingEnv(DirectRLEnv):
             fixed_asset_init_pos_rand.zero_()
         fixed_pos_init_rand = fixed_pos_init_rand @ torch.diag(fixed_asset_init_pos_rand)
 
-        fixed_state[:, 0:3] += fixed_pos_init_rand + self.scene.env_origins[env_ids]
+        fixed_state[:, 0:3] += fixed_pos_init_rand
 
         fixed_orn_init_yaw = np.deg2rad(self.cfg_task.fixed_asset_init_orn_deg)
         fixed_orn_yaw_half_range = np.deg2rad(self.cfg_task.fixed_asset_init_orn_range_deg)
@@ -1093,9 +1198,13 @@ class InsertAnythingEnv(DirectRLEnv):
         )
         fixed_state[:, 3:7] = fixed_orn_quat
 
-        fixed_state[:, 7:] = 0.0
-        self._fixed_asset.write_root_pose_to_sim(fixed_state[:, 0:7], env_ids=env_ids)
-        self._fixed_asset.write_root_velocity_to_sim(fixed_state[:, 7:], env_ids=env_ids)
+        fixed_pos_b, fixed_quat_b = self._pose_from_task(fixed_state[:, 0:3], fixed_state[:, 3:7], env_ids)
+        fixed_state[:, 0:3] = fixed_pos_b + self.scene.env_origins[env_ids]
+        fixed_state[:, 3:7] = fixed_quat_b
+        compat.write_root_pose(self._fixed_asset, fixed_state[:, 0:7], env_ids=env_ids)
+        compat.write_root_velocity(
+            self._fixed_asset, torch.zeros((len(env_ids), 6), device=self.device), env_ids=env_ids
+        )
         self._fixed_asset.reset()
 
         self.target_hole_local_pos[env_ids] = 0.0
@@ -1170,7 +1279,7 @@ class InsertAnythingEnv(DirectRLEnv):
                 break
 
             self._set_franka_to_default_pose(
-                joints=[0.00871, -0.10368, -0.00794, -1.49139, -0.00083, 1.38774, 0.0],
+                joints=self.cfg_task.robot_cfg.ik_fallback_joints,
                 env_ids=bad_envs,
             )
 
@@ -1218,12 +1327,10 @@ class InsertAnythingEnv(DirectRLEnv):
             t2=held_asset_pos_noise,
         )
 
-        held_state = self._held_asset.data.default_root_state.clone()
-        held_state[:, 0:3] = translated_held_asset_pos + self.scene.env_origins
-        held_state[:, 3:7] = translated_held_asset_quat
-        held_state[:, 7:] = 0.0
-        self._held_asset.write_root_pose_to_sim(held_state[:, 0:7])
-        self._held_asset.write_root_velocity_to_sim(held_state[:, 7:])
+        held_pos_b, held_quat_b = self._pose_from_task(translated_held_asset_pos, translated_held_asset_quat)
+        held_pose = torch.cat((held_pos_b + self.scene.env_origins, held_quat_b), dim=-1)
+        compat.write_root_pose(self._held_asset, held_pose)
+        compat.write_root_velocity(self._held_asset, torch.zeros((self.num_envs, 6), device=self.device))
         self._held_asset.reset()
 
         reset_task_prop_gains = torch.tensor(
@@ -1238,10 +1345,10 @@ class InsertAnythingEnv(DirectRLEnv):
 
         grasp_time = 0.0
         while grasp_time < 0.25:
-            self.ctrl_target_joint_pos[env_ids, 7:] = 0.0
+            self.ctrl_target_joint_pos[env_ids, 7:] = self.gripper_closed_pos
             self.close_gripper_in_place()
             self.step_sim_no_action()
-            grasp_time += self.sim.get_physics_dt()
+            grasp_time += self.physics_dt
 
         self.prev_joint_pos = self.joint_pos[:, 0:7].clone()
         self.prev_fingertip_pos = self.fingertip_midpoint_pos.clone()
@@ -1304,7 +1411,8 @@ class InsertAnythingEnv(DirectRLEnv):
         )
         self.init_fingertip_quat_obs_noise[env_ids] = quat_noise
 
-        physics_sim_view.set_gravity(carb.Float3(*self.cfg.sim.gravity))
+        compat.set_gravity(self.sim, self.cfg.sim.gravity)
+        self._gravity_off = False
 
     def close(self):
         if self.contact_force_logger is not None:

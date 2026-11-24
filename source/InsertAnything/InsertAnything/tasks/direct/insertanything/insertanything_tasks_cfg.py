@@ -3,6 +3,7 @@ from dataclasses import field
 
 import isaaclab.sim as sim_utils
 from isaaclab.assets import ArticulationCfg
+from isaaclab_physx.sim.schemas import PhysxCollisionCfg, PhysxRigidBodyCfg
 from isaaclab.utils import configclass
 from isaaclab.utils.assets import ISAACLAB_NUCLEUS_DIR
 
@@ -48,13 +49,60 @@ class HeldAssetCfg:
     height: float = 0.0
     friction: float = 0.75
     mass: float = 0.05
+    grasp_pos: list | None = None
+    """The fingertip point in the held asset's frame [m]. None: on its axis, ``height`` minus the
+    robot's ``franka_fingerpad_length`` up from its origin (the peg tasks)."""
 
 
 @configclass
 class RobotCfg:
+    """The arm and gripper the task runs on. Defaults are Factory's Franka (the released setup)."""
+
     robot_usd: str = f"{ASSET_DIR}/franka_mimic.usd"
+    articulation: ArticulationCfg | None = None
+    """Full articulation config. None builds the Franka from ``robot_usd`` (insertanything_env_cfg)."""
     franka_fingerpad_length: float = 0.017608
+    """How far the held asset's top sits above the fingertip frame (name kept from Factory)."""
     friction: float = 0.75
+
+    arm_joint_names: list = [f"panda_joint{i}" for i in range(1, 8)]
+    gripper_joint_names: list = ["panda_finger_joint1", "panda_finger_joint2"]
+    gripper_type: str = "franka"
+    """"franka": open = half the held asset's diameter * 1.25 per finger, closed = 0.
+    "robotiq_2f85": open = 0 on every linkage joint, closed = ``gripper_close_rad`` times
+    ``gripper_joint_signs``."""
+    gripper_joint_signs: list = []
+    gripper_close_rad: float = 0.0
+    gripper_pregrasp_rad: float = 0.0
+    """robotiq_2f85: the finger_joint angle the reset opens to before closing on the held asset."""
+    canonicalize_fingertip_quat: bool = False
+    """Keep the observed fingertip quaternion on the x >= 0 hemisphere. The released policies were
+    trained on the Franka, whose PhysX quaternion for the hand-down pose came out as (0, +1, ., 0); a
+    different arm, or the task-frame rotation, can return the same rotation as (0, -1, ., 0)."""
+
+    fingertip_body: str = "panda_fingertip_centered"
+    fingertip_offset: list = [0.0, 0.0, 0.0]
+    """Fingertip point in ``fingertip_body``'s frame [m]."""
+    jacobian_mode: str = "finger_average"
+    """"finger_average": mean of the two finger bodies' Jacobians (Factory/InsertAnything).
+    "point": the Jacobian of ``fingertip_body`` shifted to the fingertip point."""
+    finger_bodies: list = ["panda_leftfinger", "panda_rightfinger"]
+    """Bodies whose contact with the held asset is the gripper_peg force, and (finger_average) whose
+    Jacobians are averaged."""
+    finger_prim_subpaths: list | None = None
+    """The finger bodies' prim paths under the robot prim, when they are not its direct children."""
+
+    reset_joints: list | None = None
+    """Overrides ``CtrlCfg.reset_joints``."""
+    default_dof_pos: list | None = None
+    """Overrides ``CtrlCfg.default_dof_pos_tensor`` (null-space posture)."""
+    ik_fallback_joints: list = [0.00871, -0.10368, -0.00794, -1.49139, -0.00083, 1.38774, 0.0]
+    inertia_shaping: str | None = None
+    """Overrides ``CtrlCfg.inertia_shaping`` (with ``desired_task_inertia``)."""
+    desired_task_inertia: list | None = None
+    payload_gravity_comp: bool | None = None
+    """Overrides ``CtrlCfg.payload_gravity_comp``."""
+    """Where an env that failed the start-pose IK is reset to before retrying."""
 
 
 @configclass
@@ -72,6 +120,15 @@ class InsertAnythingTask:
     hand_init_orn: list = [3.1416, 0.0, 0.0]
     hand_init_orn_range: list = [0.0, 0.0, 0.0]
 
+    fixed_asset_pos: tuple = (0.6, 0.0, 0.05)
+    """Nominal fixed-asset (hole) position in the robot base frame [m]."""
+    cell_rotation_wxyz: list = [1.0, 0.0, 0.0, 0.0]
+    """Rotation from the TASK frame to the robot base frame. All of the task -- observations, actions,
+    rewards, randomization and the controller -- works in the task frame, where the hole faces +z
+    (InsertAnything's canonical setup). Identity reproduces the released tasks; Ry(-90 deg) puts the hole
+    on a vertical board facing the robot (-x), as the iiwa bench's pegboard sockets are."""
+    table: str = "seattle"
+    """Scenery: "seattle" (the released Franka table), "iiwa_bench" (bench top + pegboard), "none"."""
     fixed_asset_init_pos_range: list = [0.05, 0.05, 0.05]
     fixed_asset_init_orn_deg: float = 0.0
     fixed_asset_init_orn_range_deg: float = 0.0
@@ -142,7 +199,7 @@ class InsertAnythingTask:
         self.fixed_asset = self._make_fixed_asset_cfg(
             prim_path="/World/envs/env_.*/FixedAsset",
             usd_path=self.fixed_asset_cfg.usd_path,
-            pos=(0.6, 0.0, 0.05),
+            pos=tuple(self.fixed_asset_pos),
         )
         self.held_asset = self._make_held_asset_cfg()
 
@@ -152,7 +209,7 @@ class InsertAnythingTask:
             spawn=sim_utils.UsdFileCfg(
                 usd_path=usd_path,
                 activate_contact_sensors=True,
-                rigid_props=sim_utils.RigidBodyPropertiesCfg(
+                rigid_props=PhysxRigidBodyCfg(
                     max_depenetration_velocity=5.0,
                     linear_damping=0.0,
                     angular_damping=0.0,
@@ -163,12 +220,12 @@ class InsertAnythingTask:
                     solver_velocity_iteration_count=1,
                     max_contact_impulse=1e32,
                 ),
-                mass_props=sim_utils.MassPropertiesCfg(mass=self.fixed_asset_cfg.mass),
-                collision_props=sim_utils.CollisionPropertiesCfg(contact_offset=0.0005, rest_offset=0.0),
+                mass_props=sim_utils.MassCfg(mass=self.fixed_asset_cfg.mass),
+                collision_props=PhysxCollisionCfg(contact_offset=0.0005, rest_offset=0.0),
             ),
             init_state=ArticulationCfg.InitialStateCfg(
                 pos=pos,
-                rot=(1.0, 0.0, 0.0, 0.0),
+                rot=(0.0, 0.0, 0.0, 1.0),
                 joint_pos={},
                 joint_vel={},
             ),
@@ -181,7 +238,7 @@ class InsertAnythingTask:
             spawn=sim_utils.UsdFileCfg(
                 usd_path=self.held_asset_cfg.usd_path,
                 activate_contact_sensors=True,
-                rigid_props=sim_utils.RigidBodyPropertiesCfg(
+                rigid_props=PhysxRigidBodyCfg(
                     max_depenetration_velocity=5.0,
                     linear_damping=0.0,
                     angular_damping=0.0,
@@ -192,12 +249,12 @@ class InsertAnythingTask:
                     solver_velocity_iteration_count=1,
                     max_contact_impulse=1e32,
                 ),
-                mass_props=sim_utils.MassPropertiesCfg(mass=self.held_asset_cfg.mass),
-                collision_props=sim_utils.CollisionPropertiesCfg(contact_offset=0.0005, rest_offset=0.0),
+                mass_props=sim_utils.MassCfg(mass=self.held_asset_cfg.mass),
+                collision_props=PhysxCollisionCfg(contact_offset=0.0005, rest_offset=0.0),
             ),
             init_state=ArticulationCfg.InitialStateCfg(
                 pos=(0.0, 0.4, 0.1),
-                rot=(1.0, 0.0, 0.0, 0.0),
+                rot=(0.0, 0.0, 0.0, 1.0),
                 joint_pos={},
                 joint_vel={},
             ),
