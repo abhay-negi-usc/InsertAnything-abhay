@@ -1,0 +1,80 @@
+#usda 1.0
+(
+    customLayerData = {
+        string cable_assembly = '{"coupler_mm": 0.0, "clocking_deg": 0.0, "pin": "4a5599ce053044e5daf4df0030c01ec0629ae7c5", "gripper_visuals": "Isaac Sim 2F-85 (V4)"}'
+    }
+    defaultPrim = "iiwa14"
+    metersPerUnit = 1
+    upAxis = "Z"
+)
+
+def Xform "iiwa14" (
+    prepend apiSchemas = ["PhysicsArticulationRootAPI"]
+    prepend references = @iiwa14/usd/iiwa14/iiwa14.usda@
+)
+{
+    def Xform "gripper" (
+        prepend payload = @robotiq_2f85/Robotiq_2F_85_edit.usd@
+    )
+    {
+        matrix4d xformOp:transform = ( (1, 0, 0, 0), (0, 1, 0, 0), (0, 0, 1, 0), (0, 0, 1.306, 1) )
+        uniform token[] xformOpOrder = ["xformOp:transform"]
+
+        over "Robotiq_2F_85" (
+            delete apiSchemas = ["PhysicsArticulationRootAPI", "PhysxArticulationAPI"]
+        )
+        {
+        }
+    }
+
+    over "Geometry"
+    {
+        over "link_0" (
+            delete apiSchemas = ["PhysicsArticulationRootAPI", "PhysxArticulationAPI", "NewtonArticulationRootAPI"]
+        )
+        {
+            over "link_1"
+            {
+                over "link_2"
+                {
+                    over "link_3"
+                    {
+                        over "link_4"
+                        {
+                            over "link_5"
+                            {
+                                over "link_6"
+                                {
+                                    over "link_7"
+                                    {
+                                        over "tool0"
+                                        {
+                                            def Xform "camera_mount" (
+                                                prepend references = @tool/tool_meshes.usdc@
+                                            )
+                                            {
+                                                matrix4d xformOp:transform = ( (2.220446049250313e-16, -1, 0, 0), (1, 2.220446049250313e-16, 0, 0), (0, 0, 1, 0), (0, 0, -0.0724, 1) )
+                                                uniform token[] xformOpOrder = ["xformOp:transform"]
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    def PhysicsFixedJoint "gripper_joint"
+    {
+        rel physics:body0 = </iiwa14/Geometry/link_0/link_1/link_2/link_3/link_4/link_5/link_6/link_7/tool0>
+        rel physics:body1 = </iiwa14/gripper/Robotiq_2F_85/base_link>
+        point3f physics:localPos0 = (0, 0, 0)
+        point3f physics:localPos1 = (0, 0, 0)
+        quatf physics:localRot0 = (1, 0, 0, 0)
+        quatf physics:localRot1 = (1, 0, 0, 0)
+    }
+}
+

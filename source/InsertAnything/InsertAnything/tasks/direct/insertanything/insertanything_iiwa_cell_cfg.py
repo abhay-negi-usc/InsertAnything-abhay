@@ -13,8 +13,11 @@ Two placements of the single-hole tasks:
   iiwa base frame (``iiwa14_bench.frames.yaml`` ``targets.usb_connector``), facing the robot (-x)
   as on the vertical pegboard. The task frame is Ry(-90 deg): the policy still sees a hole facing +z.
 
-Asset path: set ``CABLE_ASSEMBLY_SIM_ASSETS`` to cable-assembly's ``sim/src/cable_assembly_sim/assets/data``
-if the repo is not at ``~/abhay_ws/cable-assembly``.
+Assets: ``assets/iiwa_cell`` holds the robot USDs, copied from cable-assembly's
+``sim/src/cable_assembly_sim/assets/data``: ``iiwa14_2f85{,_bench}.usda``, ``iiwa14/usd``, ``robotiq_2f85``,
+``robotiq_2f85_v3/v3_visuals.usdc`` and ``tool/tool_meshes.usdc``. Their layout is kept, because the .usda
+files reference the others by relative path. Set ``CABLE_ASSEMBLY_SIM_ASSETS`` to use another copy, e.g.
+cable-assembly's own after a rebuild there.
 """
 
 import math
@@ -30,7 +33,7 @@ from .insertanything_tasks_cfg import InsertAnythingHexagonHole_III, InsertAnyth
 
 CABLE_ASSEMBLY_SIM_ASSETS = os.environ.get(
     "CABLE_ASSEMBLY_SIM_ASSETS",
-    os.path.expanduser("~/abhay_ws/cable-assembly/sim/src/cable_assembly_sim/assets/data"),
+    os.path.join(os.path.dirname(__file__), "assets", "iiwa_cell"),
 )
 IIWA14_2F85_USD = os.path.join(CABLE_ASSEMBLY_SIM_ASSETS, "iiwa14_2f85.usda")
 

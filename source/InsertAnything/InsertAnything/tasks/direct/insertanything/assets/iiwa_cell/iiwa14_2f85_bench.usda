@@ -1,0 +1,214 @@
+#usda 1.0
+(
+    customLayerData = {
+        string cable_assembly = '{"coupler_mm": 19.080000000000002, "clocking_deg": 0.0, "pin": "4a5599ce053044e5daf4df0030c01ec0629ae7c5", "gripper_visuals": "Robotiq 2F-85 V3 + bench pads"}'
+    }
+    defaultPrim = "iiwa14"
+    metersPerUnit = 1
+    upAxis = "Z"
+)
+
+def Xform "iiwa14" (
+    prepend apiSchemas = ["PhysicsArticulationRootAPI"]
+    prepend references = @iiwa14/usd/iiwa14/iiwa14.usda@
+)
+{
+    def Xform "gripper" (
+        prepend payload = @robotiq_2f85/Robotiq_2F_85_edit.usd@
+    )
+    {
+        matrix4d xformOp:transform = ( (1, 0, 0, 0), (0, 1, 0, 0), (0, 0, 1, 0), (0, 0, 1.32508, 1) )
+        uniform token[] xformOpOrder = ["xformOp:transform"]
+
+        over "Robotiq_2F_85" (
+            delete apiSchemas = ["PhysicsArticulationRootAPI", "PhysxArticulationAPI"]
+        )
+        {
+            over "base_link"
+            {
+                over "visuals" (
+                    active = false
+                )
+                {
+                }
+
+                def Xform "visuals_v3" (
+                    prepend references = @robotiq_2f85_v3/v3_visuals.usdc@</V3/base_link>
+                )
+                {
+                }
+            }
+
+            over "left_inner_knuckle"
+            {
+                over "visuals" (
+                    active = false
+                )
+                {
+                }
+
+                def Xform "visuals_v3" (
+                    prepend references = @robotiq_2f85_v3/v3_visuals.usdc@</V3/left_inner_knuckle>
+                )
+                {
+                }
+            }
+
+            over "right_inner_knuckle"
+            {
+                over "visuals" (
+                    active = false
+                )
+                {
+                }
+
+                def Xform "visuals_v3" (
+                    prepend references = @robotiq_2f85_v3/v3_visuals.usdc@</V3/right_inner_knuckle>
+                )
+                {
+                }
+            }
+
+            over "left_inner_finger"
+            {
+                over "visuals" (
+                    active = false
+                )
+                {
+                }
+
+                def Xform "visuals_v3" (
+                    prepend references = @robotiq_2f85_v3/v3_visuals.usdc@</V3/left_inner_finger>
+                )
+                {
+                }
+            }
+
+            over "right_inner_finger"
+            {
+                over "visuals" (
+                    active = false
+                )
+                {
+                }
+
+                def Xform "visuals_v3" (
+                    prepend references = @robotiq_2f85_v3/v3_visuals.usdc@</V3/right_inner_finger>
+                )
+                {
+                }
+            }
+
+            over "left_outer_finger"
+            {
+                over "visuals" (
+                    active = false
+                )
+                {
+                }
+
+                def Xform "visuals_v3" (
+                    prepend references = @robotiq_2f85_v3/v3_visuals.usdc@</V3/left_outer_finger>
+                )
+                {
+                }
+            }
+
+            over "right_outer_finger"
+            {
+                over "visuals" (
+                    active = false
+                )
+                {
+                }
+
+                def Xform "visuals_v3" (
+                    prepend references = @robotiq_2f85_v3/v3_visuals.usdc@</V3/right_outer_finger>
+                )
+                {
+                }
+            }
+
+            over "right_outer_knuckle"
+            {
+                over "visuals" (
+                    active = false
+                )
+                {
+                }
+
+                def Xform "visuals_v3" (
+                    prepend references = @robotiq_2f85_v3/v3_visuals.usdc@</V3/right_outer_knuckle>
+                )
+                {
+                }
+            }
+
+            over "left_outer_knuckle"
+            {
+                over "visuals" (
+                    active = false
+                )
+                {
+                }
+
+                def Xform "visuals_v3" (
+                    prepend references = @robotiq_2f85_v3/v3_visuals.usdc@</V3/left_outer_knuckle>
+                )
+                {
+                }
+            }
+        }
+    }
+
+    over "Geometry"
+    {
+        over "link_0" (
+            delete apiSchemas = ["PhysicsArticulationRootAPI", "PhysxArticulationAPI", "NewtonArticulationRootAPI"]
+        )
+        {
+            over "link_1"
+            {
+                over "link_2"
+                {
+                    over "link_3"
+                    {
+                        over "link_4"
+                        {
+                            over "link_5"
+                            {
+                                over "link_6"
+                                {
+                                    over "link_7"
+                                    {
+                                        over "tool0"
+                                        {
+                                            def Xform "camera_mount" (
+                                                prepend references = @tool/tool_meshes.usdc@
+                                            )
+                                            {
+                                                matrix4d xformOp:transform = ( (2.220446049250313e-16, -1, 0, 0), (1, 2.220446049250313e-16, 0, 0), (0, 0, 1, 0), (0, 0, -0.0724, 1) )
+                                                uniform token[] xformOpOrder = ["xformOp:transform"]
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    def PhysicsFixedJoint "gripper_joint"
+    {
+        rel physics:body0 = </iiwa14/Geometry/link_0/link_1/link_2/link_3/link_4/link_5/link_6/link_7/tool0>
+        rel physics:body1 = </iiwa14/gripper/Robotiq_2F_85/base_link>
+        point3f physics:localPos0 = (0, 0, 0.01908)
+        point3f physics:localPos1 = (0, 0, 0)
+        quatf physics:localRot0 = (1, 0, 0, 0)
+        quatf physics:localRot1 = (1, 0, 0, 0)
+    }
+}
+

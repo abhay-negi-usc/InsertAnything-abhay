@@ -1,0 +1,127 @@
+#usda 1.0
+(
+    customLayerData = {
+        string creator = "URDF USD Converter v0.3.2"
+    }
+    defaultPrim = "iiwa14"
+    endTimeCode = 1000000
+    kilogramsPerUnit = 1
+    metersPerUnit = 1
+    startTimeCode = 0
+    subLayers = [
+        @./physics.usda@
+    ]
+    upAxis = "Z"
+)
+
+over "iiwa14"
+{
+    over "Physics"
+    {
+        over "A1" (
+            delete apiSchemas = ["PhysicsDriveAPI:angular", "PhysicsJointStateAPI:angular"]
+            prepend apiSchemas = ["MjcJointAPI"]
+        )
+        {
+        }
+
+        over "A2" (
+            delete apiSchemas = ["PhysicsDriveAPI:angular", "PhysicsJointStateAPI:angular"]
+            prepend apiSchemas = ["MjcJointAPI"]
+        )
+        {
+        }
+
+        over "A3" (
+            delete apiSchemas = ["PhysicsDriveAPI:angular", "PhysicsJointStateAPI:angular"]
+            prepend apiSchemas = ["MjcJointAPI"]
+        )
+        {
+        }
+
+        over "A4" (
+            delete apiSchemas = ["PhysicsDriveAPI:angular", "PhysicsJointStateAPI:angular"]
+            prepend apiSchemas = ["MjcJointAPI"]
+        )
+        {
+        }
+
+        over "A5" (
+            delete apiSchemas = ["PhysicsDriveAPI:angular", "PhysicsJointStateAPI:angular"]
+            prepend apiSchemas = ["MjcJointAPI"]
+        )
+        {
+        }
+
+        over "A6" (
+            delete apiSchemas = ["PhysicsDriveAPI:angular", "PhysicsJointStateAPI:angular"]
+            prepend apiSchemas = ["MjcJointAPI"]
+        )
+        {
+        }
+
+        over "A7" (
+            delete apiSchemas = ["PhysicsDriveAPI:angular", "PhysicsJointStateAPI:angular"]
+            prepend apiSchemas = ["MjcJointAPI"]
+        )
+        {
+        }
+
+        def MjcActuator "A1_actuator"
+        {
+            uniform double mjc:forceRange:max = 200
+            uniform double mjc:forceRange:min = -200
+            custom rel mjc:target
+            append rel mjc:target = </iiwa14/Physics/A1>
+        }
+
+        def MjcActuator "A2_actuator"
+        {
+            uniform double mjc:forceRange:max = 200
+            uniform double mjc:forceRange:min = -200
+            custom rel mjc:target
+            append rel mjc:target = </iiwa14/Physics/A2>
+        }
+
+        def MjcActuator "A3_actuator"
+        {
+            uniform double mjc:forceRange:max = 200
+            uniform double mjc:forceRange:min = -200
+            custom rel mjc:target
+            append rel mjc:target = </iiwa14/Physics/A3>
+        }
+
+        def MjcActuator "A4_actuator"
+        {
+            uniform double mjc:forceRange:max = 200
+            uniform double mjc:forceRange:min = -200
+            custom rel mjc:target
+            append rel mjc:target = </iiwa14/Physics/A4>
+        }
+
+        def MjcActuator "A5_actuator"
+        {
+            uniform double mjc:forceRange:max = 200
+            uniform double mjc:forceRange:min = -200
+            custom rel mjc:target
+            append rel mjc:target = </iiwa14/Physics/A5>
+        }
+
+        def MjcActuator "A6_actuator"
+        {
+            uniform double mjc:forceRange:max = 200
+            uniform double mjc:forceRange:min = -200
+            custom rel mjc:target
+            append rel mjc:target = </iiwa14/Physics/A6>
+        }
+
+        def MjcActuator "A7_actuator"
+        {
+            uniform double mjc:forceRange:max = 200
+            uniform double mjc:forceRange:min = -200
+            custom rel mjc:target
+            append rel mjc:target = </iiwa14/Physics/A7>
+        }
+    }
+}
+

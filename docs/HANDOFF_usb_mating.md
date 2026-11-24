@@ -45,23 +45,27 @@ torch 2.11+cu130 and Python 3.12.
 4. **Checkpoints are git-ignored.** Download them from Hugging Face into
    `source/InsertAnything/InsertAnything/tasks/direct/insertanything/checkpoints/`. Commands and SHA256s
    are in `checkpoints/README.md`.
-5. **Assets that are not in any git repo** (cable-assembly ignores them on purpose):
-   - **iiwa + 2F-85:** cable-assembly's `sim/src/cable_assembly_sim/assets/data/` must contain
-     `iiwa14_2f85.usda`, `iiwa14_2f85_bench.usda`, `iiwa14/usd/`, `iiwa14/meshes/` and `robotiq_2f85/`.
-     They come from cable-assembly's `scripts/build_iiwa14.py`, or copy them from the old PC.
-     Override the location with `CABLE_ASSEMBLY_SIM_ASSETS`.
-   - **USB CAD** (McMaster 4974T135 cord, 4574N11 adapter): copy
-     `cable-assembly/sim/src/cable_assembly_sim/assets/data/usb/` from the old PC. It holds both STEP
-     files and cable-assembly's `usb_plug.usd` / `usb_socket.usd` from `build_usb.py`.
-   - **This repo's USB assets** (`assets/usb/*.usd`, `usb_prongs.json`) are derived from that CAD and kept
-     out of git for the same licensing reason. Rebuild them, about 1 min:
+5. **CAD and robot assets are in this repo** (`source/.../insertanything/assets/`). cable-assembly
+   deliberately does not version them, because McMaster and Robotiq CAD are theirs to distribute. Keep that
+   in mind if this repo is public.
+   - `assets/iiwa_cell/`: `iiwa14_2f85{,_bench}.usda`, `iiwa14/usd` (+ urdf, LICENSE), `robotiq_2f85/`,
+     `robotiq_2f85_v3/v3_visuals.usdc`, `tool/tool_meshes.usdc`. These are copied from cable-assembly's
+     `sim/src/cable_assembly_sim/assets/data` with the layout kept: the .usda files use relative
+     references, all of which resolve inside the repo except Kit's built-in `OmniPBR.mdl`.
+     `CABLE_ASSEMBLY_SIM_ASSETS` points at another copy.
+   - `assets/usb/cad/`: the McMaster STEPs (4974T135 cord, 4574N11 adapter), and cable-assembly's
+     `usb_plug.usd` / `usb_socket.usd` from its `sim/scripts/build_usb.py`, which are the colliders.
+   - `assets/usb/`: the built task assets (`usb_plug.usd`, `usb_socket_{noprongs,compliant}.usd`,
+     `usb_prongs.json`). Rebuilding from `cad/` reproduces them byte for byte:
      ```bash
      cd ~/abhay_ws/cable-assembly/sim && ./run.sh --extra cad python \
          ~/abhay_ws/InsertAnything-abhay/scripts/assets/extract_usb_prongs.py \
-         src/cable_assembly_sim/assets/data/usb/4574N11_panel_mount_usb_adapter.step \
+         ~/abhay_ws/InsertAnything-abhay/source/InsertAnything/InsertAnything/tasks/direct/insertanything/assets/usb/cad/4574N11_panel_mount_usb_adapter.step \
          ~/abhay_ws/InsertAnything-abhay/source/InsertAnything/InsertAnything/tasks/direct/insertanything/assets/usb/usb_prongs.json
      cd ~/abhay_ws/InsertAnything-abhay && ~/abhay_ws/cable-assembly/sim/.venv/bin/python scripts/assets/build_usb_assets.py
      ```
+     The prong extraction needs gmsh and scipy (cable-assembly's `cad` extra). The USD build needs only
+     `pxr`, numpy and scipy.
 6. **Smoke test** (about 1 min). Expect `ever_seated: 4`:
    ```bash
    ./scripts/run.sh python scripts/diagnostics/usb_probe.py --task InsertAnything-Usb-NoProngs-Direct-v0 \

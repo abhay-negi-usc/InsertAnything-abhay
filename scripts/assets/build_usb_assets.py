@@ -2,9 +2,9 @@
 
     ./scripts/run.sh python scripts/assets/build_usb_assets.py [--prong_stiffness 5000] [--prong_damping 10]
 
-Inputs (cable-assembly, ``CABLE_ASSEMBLY_SIM_ASSETS``):
-    usb/usb_plug.usd     the plug: a solid shell envelope with the tongue cavity (SDF), overmold, cable
-    usb/usb_socket.usd   the receptacle: the pocket cut clean at the USB-A shell's inside, i.e. with the
+Inputs (``assets/usb/cad``, from cable-assembly's sim/scripts/build_usb.py; ``USB_CAD_DIR`` overrides):
+    usb_plug.usd         the plug: a solid shell envelope with the tongue cavity (SDF), overmold, cable
+    usb_socket.usd       the receptacle: the pocket cut clean at the USB-A shell's inside, i.e. with the
                          shell's spring prongs taken out, and the adapter CAD for drawing
 and ``assets/usb/usb_prongs.json`` (scripts/assets/extract_usb_prongs.py): the seven prongs as convex pieces.
 
@@ -25,10 +25,8 @@ from pxr import Gf, Sdf, Usd, UsdGeom, UsdPhysics, UsdShade
 
 REPO = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 OUT = os.path.join(REPO, "source/InsertAnything/InsertAnything/tasks/direct/insertanything/assets/usb")
-SRC = os.path.join(
-    os.environ.get("CABLE_ASSEMBLY_SIM_ASSETS", os.path.expanduser("~/abhay_ws/cable-assembly/sim/src/cable_assembly_sim/assets/data")),
-    "usb",
-)
+SRC = os.environ.get("USB_CAD_DIR", os.path.join(OUT, "cad"))
+"""cable-assembly's usb/usb_{plug,socket}.usd (its sim/scripts/build_usb.py), copied into assets/usb/cad."""
 
 
 def mesh_data(stage, path):
