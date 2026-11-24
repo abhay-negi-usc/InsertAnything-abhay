@@ -3,3 +3,6 @@
 *.jpg -text
 *.jpeg -text
 *.usd -text
+# CAD exchange files: keep byte-exact (McMaster STEPs use CRLF).
+*.step -text
+*.STEP -text
