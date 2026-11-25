@@ -3,6 +3,8 @@
     ./scripts/run.sh python scripts/rl_games/train.py --task InsertAnything-Usb-NoProngs-Direct-v0 \
         --num_envs 1024 --seed 0 [--max_iterations N] [--checkpoint <resume .pth>] [--set key=json ...]
 
+With --checkpoint, --max_iterations counts epochs beyond the checkpoint's own epoch counter.
+
 Checkpoints and TensorBoard logs go to logs/rl_games/<agent config name>/<run name>/ (``--run_name``, else a
 timestamp). Env-config overrides use the same ``--set`` syntax as play.py and usb_probe.py, so a policy can be
 trained and evaluated under the same controller settings.
@@ -122,6 +124,12 @@ def main():
         params["load_checkpoint"] = True
         params["load_path"] = resume_path
         print(f"[INFO] Resuming from: {resume_path}")
+        # RL-Games restores the checkpoint's epoch counter (979 for the released hexagon-III), so a bare
+        # max_epochs would end the run at once: --max_iterations counts epochs on top of it.
+        ckpt_epoch = int(torch.load(resume_path, map_location="cpu", weights_only=True).get("epoch", 0))
+        if args_cli.max_iterations is not None:
+            config["max_epochs"] = ckpt_epoch + args_cli.max_iterations
+        print(f"[INFO] Checkpoint epoch {ckpt_epoch}; training to epoch {config['max_epochs']}")
     env_cfg.log_dir = log_dir
 
     with launch_simulation(env_cfg, args_cli):

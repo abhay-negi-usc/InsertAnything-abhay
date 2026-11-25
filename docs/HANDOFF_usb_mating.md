@@ -332,6 +332,17 @@ gap. `central_value_config.minibatch_size` is still 512 (256 critic minibatches 
 `--agent_set central_value_config.minibatch_size=4096`. At ~1000 fps, 13M frames (the release budget,
 800 epochs × 128 envs × 128 steps) is ~3.7 h; at 1024 envs that is ~100 epochs.
 
+**On the iiwa it is 4–5x slower:** Usb-NoProngs-Iiwa14Pegboard at 1024 envs steps at ~340–410 env-steps/s,
+so ~7.5 min per epoch and ~12.5 h for 100 epochs. Both arms use 192 solver position iterations, so the likely
+cost is the iiwa + 2F-85 model (more links, the gripper's closed-loop linkage, pad contacts). Profiling it
+(fewer gripper links, lower iteration counts, checked against scripted seating) would pay off before any
+long iiwa sweep.
+
+**Resuming:** RL-Games restores the checkpoint's epoch counter (979 for hexagon-III) and its best reward,
+so `train.py --checkpoint` makes `--max_iterations` count epochs beyond the checkpoint's. "Best" checkpoints
+(`nn/InsertAnything.pth`) compare against the restored reward; use the periodic ones
+(`--agent_set save_frequency=10`).
+
 ---
 
 ## 7. Next steps, in order
@@ -346,8 +357,10 @@ gap. `central_value_config.minibatch_size` is still 512 (256 critic minibatches 
    ```
    Then Usb-Compliant (the raised push ceiling changes the action scale in z, so expect a re-adaptation),
    then the USB-I..IV clearance ladder. A from-scratch run on the same budget is the control.
-   Not yet checked: whether resuming from the checkpoint restores the optimizer and epoch counter as
-   intended (`--checkpoint` sets `load_checkpoint`, as Lab's own trainer does).
+   **Running (started 2026-11-24 19:22):** exactly this command plus `--agent_set save_frequency=10`, epochs
+   979 → 1079, log `logs/train/usb_np_iiwapeg_ft.log`, checkpoints and TensorBoard in
+   `logs/rl_games/InsertAnything/usb_np_iiwapeg_ft/`. ETA ~12.5 h (§6). Evaluate with play.py on the same
+   task, against 83.6 % zero-shot.
 2. **Close the iiwa dynamics gap for the released policies** (hexagon 88.5 vs 95.5 %). Inertia shaping is out.
    Candidates: train on the iiwa directly (step 1 does this for USB), or domain-randomize the arm (Λ
    coupling sign, gains) when training, which the plan's DR already partly covers.
