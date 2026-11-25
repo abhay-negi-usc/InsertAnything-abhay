@@ -104,11 +104,12 @@ class InsertAnythingEnv(DirectRLEnv):
 
         insertanything_utils.set_friction(self._held_asset, self.cfg_task.held_asset_cfg.friction, self.scene.num_envs)
         insertanything_utils.set_friction(self._robot, self.cfg_task.robot_cfg.friction, self.scene.num_envs)
-        insertanything_utils.set_friction(
-            self._fixed_asset,
-            self.cfg_task.fixed_asset_cfg.friction,
-            self.scene.num_envs,
-        )
+        if not getattr(self.cfg_task.fixed_asset_cfg, "keep_usd_materials", False):
+            insertanything_utils.set_friction(
+                self._fixed_asset,
+                self.cfg_task.fixed_asset_cfg.friction,
+                self.scene.num_envs,
+            )
 
     def _init_tensors(self):
         self.ctrl_target_joint_pos = torch.zeros((self.num_envs, self._robot.num_joints), device=self.device)
@@ -1364,7 +1365,8 @@ class InsertAnythingEnv(DirectRLEnv):
             n_envs = len(env_ids)
             frictions = torch.empty(n_envs, device=self.device).uniform_(*self.cfg_task.dr_friction_range)
             insertanything_utils.set_friction(self._held_asset, frictions, env_ids, device=self.device)
-            insertanything_utils.set_friction(self._fixed_asset, frictions, env_ids, device=self.device)
+            if not getattr(self.cfg_task.fixed_asset_cfg, "keep_usd_materials", False):
+                insertanything_utils.set_friction(self._fixed_asset, frictions, env_ids, device=self.device)
             self.dr_frictions[env_ids, 0] = frictions
 
             trans_kp = torch.empty((n_envs, 3), device=self.device).uniform_(*self.cfg_task.dr_gains_trans_range)

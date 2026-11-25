@@ -1,6 +1,9 @@
 """Build InsertAnything's USB-A assets from cable-assembly's USB colliders.
 
     ./scripts/run.sh python scripts/assets/build_usb_assets.py [--prong_stiffness 5000] [--prong_damping 10]
+    # an extra receptacle for a stiffness sweep, leaving the committed assets alone:
+    ./scripts/run.sh python scripts/assets/build_usb_assets.py --compliant_only --suffix _k1000 --prong_stiffness 1000
+        (use it with --set 'scene.fixed_asset.spawn.usd_path="<abs path>/usb_socket_compliant_k1000.usd"')
 
 Inputs (``assets/usb/cad``, from cable-assembly's sim/scripts/build_usb.py; ``USB_CAD_DIR`` overrides):
     usb_plug.usd         the plug: a solid shell envelope with the tongue cavity (SDF), overmold, cable
@@ -117,9 +120,9 @@ def build_plug():
     stage.GetRootLayer().Save()
 
 
-def build_socket(variant, prongs, stiffness, damping):
+def build_socket(variant, prongs, stiffness, damping, suffix=""):
     src = Usd.Stage.Open(os.path.join(SRC, "usb_socket.usd"))
-    stage = new_stage(os.path.join(OUT, f"usb_socket_{variant}.usd"))
+    stage = new_stage(os.path.join(OUT, f"usb_socket_{variant}{suffix}.usd"))
     holder = UsdGeom.Xform.Define(stage, "/Root/usb_socket")
     body = UsdGeom.Xform.Define(stage, "/Root/usb_socket/usb_socket")
     UsdPhysics.RigidBodyAPI.Apply(body.GetPrim())
@@ -149,10 +152,16 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--prong_stiffness", type=float, default=5000.0, help="N/m per prong contact.")
     ap.add_argument("--prong_damping", type=float, default=10.0, help="N s/m per prong contact.")
+    ap.add_argument("--compliant_only", action="store_true", help="Build only the compliant receptacle.")
+    ap.add_argument("--suffix", default="", help="Appended to the compliant receptacle's file name.")
     args = ap.parse_args()
     os.makedirs(OUT, exist_ok=True)
     with open(os.path.join(OUT, "usb_prongs.json")) as f:
         prongs = json.load(f)
+    if args.compliant_only:
+        build_socket("compliant", prongs, args.prong_stiffness, args.prong_damping, args.suffix)
+        print("wrote", f"usb_socket_compliant{args.suffix}.usd")
+        return
     build_plug()
     build_socket("noprongs", prongs, None, None)
     build_socket("compliant", prongs, args.prong_stiffness, args.prong_damping)

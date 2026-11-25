@@ -40,6 +40,10 @@ class FixedAssetCfg:
     base_height: float = 0.0
     friction: float = 0.75
     mass: float = 0.05
+    keep_usd_materials: bool = False
+    """Leave the asset's shape materials as authored in the USD: no friction writes at startup or in
+    friction DR. Needed for compliant-contact materials, which the PhysX tensor material write
+    (compat.set_friction) replaces with plain rigid ones."""
 
 
 @configclass
@@ -122,6 +126,9 @@ class InsertAnythingTask:
 
     fixed_asset_pos: tuple = (0.6, 0.0, 0.05)
     """Nominal fixed-asset (hole) position in the robot base frame [m]."""
+    pos_action_threshold: list | None = None
+    """Overrides ``CtrlCfg.pos_action_threshold`` (task frame): the largest force the action interface can
+    command is Kp times this (targets stay within ``pos_action_bounds`` of the hole)."""
     cell_rotation_wxyz: list = [1.0, 0.0, 0.0, 0.0]
     """Rotation from the TASK frame to the robot base frame. All of the task -- observations, actions,
     rewards, randomization and the controller -- works in the task frame, where the hole faces +z

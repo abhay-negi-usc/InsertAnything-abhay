@@ -181,6 +181,10 @@ def iiwa_robot_cfg(joints_deg: list, held_width: float) -> RobotCfg:
         reset_joints=q,
         default_dof_pos=q,
         ik_fallback_joints=q,
+        # The held part's weight on task -z, as on the Franka the policies were trained on (a no-op on the
+        # bench). Controller study, pegboard, 2026-11-24: scripted USB 74.7 -> 83.5 %, hexagon-III policy
+        # 86.3 -> 88.5 %. Inertia shaping (nominal_trans) is left off: 24.8 % / 31.4 % on the same tests.
+        payload_gravity_comp=True,
     )
 
 

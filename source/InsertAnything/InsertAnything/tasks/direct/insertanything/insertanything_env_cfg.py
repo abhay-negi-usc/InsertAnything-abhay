@@ -277,6 +277,8 @@ class InsertAnythingEnvCfg(DirectRLEnvCfg):
             self.ctrl.desired_task_inertia = list(robot_cfg.desired_task_inertia)
         if getattr(robot_cfg, "payload_gravity_comp", None) is not None:
             self.ctrl.payload_gravity_comp = robot_cfg.payload_gravity_comp
+        if getattr(self.task, "pos_action_threshold", None) is not None:
+            self.ctrl.pos_action_threshold = list(self.task.pos_action_threshold)
 
         self.scene.fixed_asset = self.task.fixed_asset
         self.scene.held_asset = self.task.held_asset

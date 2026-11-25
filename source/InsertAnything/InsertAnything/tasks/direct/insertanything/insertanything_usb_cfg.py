@@ -52,6 +52,9 @@ class UsbSocketNoProngs(FixedAssetCfg):
 @configclass
 class UsbSocketCompliant(UsbSocketNoProngs):
     usd_path: str = f"{USB_DIR}/usb_socket_compliant.usd"
+    # set_friction would turn the prongs rigid (0/1024 vs 469/1024 scripted seats); the USD's
+    # friction is already 0.3.
+    keep_usd_materials: bool = True
 
 
 @configclass
@@ -94,6 +97,12 @@ class InsertAnythingUsb(InsertAnythingHexagonHole_III):
 class InsertAnythingUsbCompliant(InsertAnythingUsb):
     name: str = "insertanything_usb_compliant"
     fixed_asset_cfg: FixedAssetCfg = UsbSocketCompliant()
+    # The prongs (k = 5000 N/m) stop a plug pushed with the default ~2.2 N ceiling (Kp * 0.02 m) 2-3 mm and
+    # 7 mm short of seated. 5x in z (~4x near the seat, where pos_action_bounds clips the target): scripted
+    # Franka insertion 469/1024 (45.8 %) -> 229/256 (89.5 %, all stay seated), peak grip force 5.5 N
+    # median / 8.4 N p90 (USB 2.0 allows 35 N). Softer prongs (k = 300-1000) seat as often at the default
+    # ceiling but ~4 % pop back out. logs/usb/prongs, 2026-11-24.
+    pos_action_threshold: list = [0.02, 0.02, 0.1]
 
 
 def _iiwa_bench(base, base_name):
